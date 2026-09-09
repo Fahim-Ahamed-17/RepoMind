@@ -27,6 +27,15 @@ Confirm none of these were weakened. See [AGENTS.md](../AGENTS.md).
 - [ ] Nothing new is written inside the indexed repository
 - [ ] No raw SQL outside `store/sqlite/`
 
+## Scope
+
+- [ ] Every change maps to a ticket (`RM-xxx`) and a specified feature (`F-x`)
+- [ ] **No specification document was modified** — `docs/design.md`, `docs/features.md`,
+      `docs/implementation-plan.md`, `docs/project-document.md`, `docs/conventions.md`,
+      `AGENTS.md`. If one was, say why below and expect it reviewed as a decision, not a diff
+- [ ] Nothing was built that the specification does not ask for
+- [ ] Commits are individually working states, so any one of them is a safe point to return to
+
 ## New dependencies
 
 <!-- Delete if none. Otherwise: what it does, why the standard library or an existing dependency

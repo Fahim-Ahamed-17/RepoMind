@@ -26,6 +26,50 @@ Read before writing code:
 
 ---
 
+## Rule zero: stay inside the specification
+
+**These documents are read-only for you.**
+
+```
+AGENTS.md                         docs/features.md
+CLAUDE.md                         docs/implementation-plan.md
+docs/project-document.md          docs/conventions.md
+docs/design.md                    docs/project-document.docx
+                                  docs/archive/**
+```
+
+Read them constantly. Edit them **only** when a human explicitly instructs you to, in that
+instruction, for that change. "It seemed out of date" is not authorisation.
+
+### Do not go beyond the specification
+
+- **Do not build features that are not in `features.md`.** Every feature has an ID, a priority,
+  and — for deferred ones — an unlock condition. If it has no ID, it is not in scope.
+- **Do not add tickets** to `implementation-plan.md`, or work ahead to a later milestone because
+  the current one is blocked.
+- **Do not extend a ticket's scope** because adjacent code looks improvable. Note it and move on.
+- **Do not resolve ambiguity by inventing requirements.** An underspecified ticket is a question
+  for a human, not a gap for you to fill.
+- **Do not implement a deferred feature (F-18 to F-28)** because it became easy. The unlock
+  conditions are evidence thresholds, not difficulty estimates.
+
+### When reality contradicts the specification
+
+It will. A design assumption will turn out wrong, an API will not behave as described, a ticket
+will depend on something that does not exist.
+
+**Stop and report it. Do not edit the specification to match what you built.**
+
+A specification edited to fit the code is worse than no specification: it launders a decision
+nobody made, and it destroys the record of *why* the original choice existed. The documents are
+valuable precisely because they were written before the code and can therefore contradict it.
+
+State plainly what the specification says, what you found, and what you recommend. Then wait.
+Changing a design decision is a human's call — `docs/design.md` records nine of them with their
+alternatives specifically so they can be challenged, not silently overwritten.
+
+---
+
 ## Invariants — do not violate these
 
 These are not style preferences. Each one traces to a product commitment, and breaking any of
@@ -155,10 +199,45 @@ Every change to graph, retrieval, or egress logic needs a test. The invariant te
 
 ---
 
-## Commits
+## Commits and recoverability
 
-Imperative mood, explain **why** rather than what, wrap at 72 characters. Reference tickets and
-features where relevant: `RM-024`, `F-7`.
+Commit history is the undo mechanism. Its value is not tidiness — it is that when something turns
+out wrong three hours later, there is a known-good point to return to. Commit accordingly.
+
+### Commit at logical checkpoints
+
+**One logical change per commit, and every commit leaves the tree working** — tests pass, types
+check, lint is clean. A commit that does not build is not a recovery point.
+
+Do not batch a whole milestone into one commit. Commit when you reach a coherent, working state,
+in particular:
+
+- **After a schema change, on its own.** Schema is the most expensive thing to unwind; never
+  bundle it with the code that uses it.
+- **After a protocol or interface lands**, before implementing against it.
+- **After each ticket's acceptance criteria pass.**
+- **Before starting anything risky** — a large refactor, a dependency swap, a rewrite of working
+  code. That commit is the thing you will be glad exists.
+
+If a ticket is large, commit the parts as they become individually correct. Three recoverable
+commits beat one that has to be unpicked by hand.
+
+### Never destroy recovery points
+
+**Do not use** `git commit --amend`, `git rebase`, `git reset --hard`, `git push --force`, or
+`git checkout -- <file>` over uncommitted work. Each one destroys exactly what this section
+exists to create. If you believe history needs rewriting, ask.
+
+**To undo a change that turned out wrong, use `git revert`.** It adds a commit rather than
+removing one, so the mistake and its correction both stay visible — which is the point.
+
+Never delete or overwrite a file you have not read. Never discard uncommitted work that is not
+yours.
+
+### Messages
+
+Imperative mood, wrapped at 72 characters, explaining **why** rather than what — the diff already
+shows what. Reference tickets and features so `git log --grep=RM-024` finds the work.
 
 ```
 Add cycle-safe reverse traversal (RM-024)
@@ -168,4 +247,9 @@ rather than UNION ALL and caps depth, then recovers shortest paths with
 MIN(depth). Without this a query on a cyclic fixture never terminates.
 ```
 
-Do not commit unless asked. Do not push, tag, or release.
+### Scope of your git authority
+
+You may **commit** on a feature branch at the checkpoints above.
+
+You may not **push**, **tag**, **release**, **merge to `main`**, **open a pull request**, or
+**modify remote state** unless explicitly asked. Those are outward-facing and are a human's call.

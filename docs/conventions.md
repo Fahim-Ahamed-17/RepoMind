@@ -150,8 +150,14 @@ are the ones recording a decision:
 # terminate. MIN(depth) below recovers the shortest path. See design.md §4.4.
 ```
 
-**When code contradicts a document, one of them is wrong — fix both.** Design decisions live in
-`docs/design.md` as `AD-x`; a change that invalidates one updates it in the same commit.
+**When code contradicts a specification, stop — do not reconcile it yourself.** The specification
+documents listed in [`AGENTS.md`](../AGENTS.md) "Rule zero" are read-only; editing one to match
+what was built launders a decision nobody made. Report the contradiction and let a maintainer
+decide which side is wrong. Design decisions live in `docs/design.md` as `AD-x` and were written
+with their alternatives precisely so they can be challenged rather than quietly overwritten.
+
+This applies to humans too. The asymmetry is only in authority: a maintainer may change a
+specification deliberately, in its own commit, with the reason recorded.
 
 ---
 
@@ -169,7 +175,13 @@ hand-written, or they drift.
 **Branches:** `feat/RM-024-reverse-traversal`, `fix/...`, `docs/...`, `chore/...`.
 
 **Commits:** imperative, wrapped at 72, explaining why. Reference `RM-xxx` and `F-x`. One logical
-change per commit — formatting churn goes in its own.
+change per commit — formatting churn goes in its own, and a schema change always goes in its own.
+
+Every commit leaves the tree working: tests pass, types check, lint is clean. A commit that does
+not build is not a recovery point, and recovery points are the reason the history exists. Prefer
+`git revert` over rewriting history when something turns out wrong. Full discipline, including
+which git operations are off-limits, is in [`AGENTS.md`](../AGENTS.md) "Commits and
+recoverability" — it applies to humans equally.
 
 **Pull requests** state what changed and why, which ticket and features, how it was verified, and
 any new dependency with its justification.

@@ -46,6 +46,12 @@ Read, in this order:
 2. [`docs/conventions.md`](docs/conventions.md) — style and patterns
 3. [`AGENTS.md`](AGENTS.md) — the invariants section applies to humans equally
 
+**Specifications are changed deliberately, never incidentally.** If you find that the code and a
+specification disagree, say so in an issue rather than editing the document to match the code —
+that destroys the record of why the original decision was made. `docs/design.md` records nine
+decisions with the alternatives considered, precisely so they can be argued with. Maintainer
+review is required on those paths.
+
 **The invariants are not negotiable.** Indexing never touches the network. No LLM at index time.
 Confidence tiers never merge. `deny_remote` cannot be overridden. Retrieval works without an LLM.
 Nothing is written inside the indexed repository.
