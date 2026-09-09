@@ -4,23 +4,18 @@
 # "Rule zero"). Editing a spec to match what was built launders a decision
 # nobody made, so changes to these paths are a deliberate act that a human
 # signs off on -- not a side effect of a feature branch.
-#
-# TODO: @fahim-ahamed is a placeholder. Replace with the real GitHub
-# handle(s) before pushing to a remote -- CODEOWNERS silently does
-# nothing if the owner does not exist, which is the worst failure mode
-# for a guard.
 
-/AGENTS.md                    @fahim-ahamed
-/CLAUDE.md                    @fahim-ahamed
-/docs/project-document.md     @fahim-ahamed
-/docs/design.md               @fahim-ahamed
-/docs/features.md             @fahim-ahamed
-/docs/implementation-plan.md  @fahim-ahamed
-/docs/conventions.md          @fahim-ahamed
-/docs/archive/                @fahim-ahamed
+/AGENTS.md                    @fahim-ahamed-17
+/CLAUDE.md                    @fahim-ahamed-17
+/docs/project-document.md     @fahim-ahamed-17
+/docs/design.md               @fahim-ahamed-17
+/docs/features.md             @fahim-ahamed-17
+/docs/implementation-plan.md  @fahim-ahamed-17
+/docs/conventions.md          @fahim-ahamed-17
+/docs/archive/                @fahim-ahamed-17
 
 # Governance and release surface
-/LICENSE                      @fahim-ahamed
-/CODE_OF_CONDUCT.md           @fahim-ahamed
-/.github/                     @fahim-ahamed
-/pyproject.toml               @fahim-ahamed
+/LICENSE                      @fahim-ahamed-17
+/CODE_OF_CONDUCT.md           @fahim-ahamed-17
+/.github/                     @fahim-ahamed-17
+/pyproject.toml               @fahim-ahamed-17

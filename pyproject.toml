@@ -63,9 +63,9 @@ dev = [
 repomind = "repomind.cli.main:app"
 
 [project.urls]
-Documentation = "https://github.com/OWNER/repomind/tree/main/docs"
-Source = "https://github.com/OWNER/repomind"
-Issues = "https://github.com/OWNER/repomind/issues"
+Documentation = "https://github.com/fahim-ahamed-17/repomind/tree/main/docs"
+Source = "https://github.com/fahim-ahamed-17/repomind"
+Issues = "https://github.com/fahim-ahamed-17/repomind/issues"
 
 [tool.hatch.build.targets.wheel]
 packages = ["repomind"]

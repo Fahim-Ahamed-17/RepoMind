@@ -19,7 +19,7 @@ built is worth far more than fixing it afterwards.
 ## Setup
 
 ```bash
-git clone https://github.com/OWNER/repomind
+git clone https://github.com/fahim-ahamed-17/repomind
 cd repomind
 python -m venv .venv && source .venv/bin/activate   # Windows: .venv\Scripts\activate
 pip install -e ".[dev]"
