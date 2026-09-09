@@ -104,6 +104,12 @@ ignore = [
 [tool.ruff.lint.per-file-ignores]
 "tests/**" = ["ARG", "S", "PLR2004"]
 "tests/fixtures/**" = ["ALL"]   # deliberately messy sample code
+# repomind.http is a deliberate layer name (design.md section 2's "FastAPI"
+# box; named in pyproject.toml's import-linter layers contract below) and
+# shadowing the stdlib http module is not a real risk here -- every import
+# in this codebase is absolute (repomind.http.x), never a bare `import http`
+# from inside the package itself.
+"repomind/http/**" = ["A005"]
 
 [tool.ruff.lint.flake8-tidy-imports]
 ban-relative-imports = "parents"
