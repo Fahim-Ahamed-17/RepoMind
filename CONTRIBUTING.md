@@ -107,11 +107,10 @@ precisely so it can be challenged.
 
 ## Licensing
 
-**Not yet set.** Apache-2.0 is intended (see `docs/project-document.md` §13), but the `LICENSE`
-file is deliberately absent pending confirmation of the institution's IP policy on student work.
+This project is licensed under [Apache-2.0](LICENSE). By contributing, you agree that your
+contributions will be licensed under the same terms.
 
-Until that is resolved, contributions are accepted on the understanding that they will be
-released under Apache-2.0. If you are not comfortable with that, wait for the license to land.
+Copyright is held collectively by the club and its contributors, not by any individual.
 
 Add yourself to [CONTRIBUTORS.md](CONTRIBUTORS.md) in your first pull request.
 

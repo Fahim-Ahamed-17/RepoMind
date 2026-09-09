@@ -10,7 +10,7 @@ without your code ever leaving your laptop.
 [![Status](https://img.shields.io/badge/status-pre--implementation-orange)](docs/implementation-plan.md)
 [![Python](https://img.shields.io/badge/python-3.11%2B-blue)](pyproject.toml)
 [![Specs](https://img.shields.io/badge/specs-complete-brightgreen)](docs/)
-[![License](https://img.shields.io/badge/license-pending-lightgrey)](#license)
+[![License](https://img.shields.io/badge/license-Apache--2.0-blue)](LICENSE)
 
 [Design](docs/design.md) · [Features](docs/features.md) · [Plan](docs/implementation-plan.md) · [Contributing](CONTRIBUTING.md)
 
@@ -222,9 +222,8 @@ fixing it afterwards. The design records its alternatives specifically so it can
 
 ## License
 
-**Not yet set.** Apache-2.0 is intended, pending confirmation of the institution's IP policy on
-student work. Contributions are accepted on the understanding that they will be released under
-Apache-2.0.
+[Apache-2.0](LICENSE). Chosen for its explicit patent grant and because corporate legal teams
+approve it without friction — which matters when your users are often reading code at work.
 
 ## Acknowledgements
 
