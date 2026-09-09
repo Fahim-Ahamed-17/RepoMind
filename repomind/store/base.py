@@ -114,6 +114,22 @@ class GraphStore(Protocol):
         self, repo_id: int, file_id: int | None = None, limit: int = DEFAULT_LIST_LIMIT
     ) -> Sequence[Symbol]: ...
 
+    def all_symbols(self, repo_id: int) -> Sequence[Symbol]:
+        """Every symbol in the repo, uncapped.
+
+        RM-021: the one deliberate exception to this file's own "every
+        query is bounded" rule, stated as its own method rather than a
+        large ``limit`` passed to :meth:`list_symbols` so the exception is
+        named and searchable, not a magic number. Exists because heuristic
+        resolution genuinely needs the complete table -- a reference
+        routinely crosses file boundaries, so there is no page of results
+        that would be enough on its own. "Uncapped" is bounded in practice
+        by design.md section 11.1's own v1 targets (~50k symbols for a
+        ~5k-file repo); this stops being fine only past the scale where
+        :class:`GraphStore` itself needs revisiting (section 11.2).
+        """
+        ...
+
     def count_symbols_by_kind(self, repo_id: int) -> dict[str, int]:
         """For the index-completion summary (F-1 requirement 6)."""
         ...

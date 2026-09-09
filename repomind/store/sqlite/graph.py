@@ -283,6 +283,12 @@ class SqliteGraphStore:
             ).fetchall()
         return [_row_to_symbol(r) for r in rows]
 
+    def all_symbols(self, repo_id: int) -> Sequence[Symbol]:
+        rows = self._conn.execute(
+            "SELECT * FROM symbol WHERE repo_id = ? ORDER BY id", (repo_id,)
+        ).fetchall()
+        return [_row_to_symbol(r) for r in rows]
+
     def count_symbols_by_kind(self, repo_id: int) -> dict[str, int]:
         counts = {k.value: 0 for k in SymbolKind}
         rows = self._conn.execute(

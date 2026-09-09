@@ -1,9 +1,12 @@
-"""End-to-end pipeline tests: discover -> parse -> persist.
+"""End-to-end pipeline tests: discover -> parse -> resolve -> persist.
 
-This is M1's own exit criterion (implementation-plan.md section 2):
+Covers M1's own exit criterion (implementation-plan.md section 2):
 "`repomind index .` on a 1k-file Python repo produces symbols with correct
 spans; no network calls" -- the no-network half lives in
-tests/invariants/, this file covers "produces symbols with correct spans."
+tests/invariants/, this file covers "produces symbols with correct spans" --
+plus M2's: "`repomind refs <symbol>` returns correct callers ..., grouped
+by tier", exercised here as "the pipeline actually persists the
+cross-file, heuristic-tier edges resolve.py computes."
 """
 
 from __future__ import annotations
@@ -12,7 +15,7 @@ from pathlib import Path
 
 import pytest
 from repomind.index.pipeline import IndexProgress, index_repository
-from repomind.model import IndexRunStatus, ScipStatus, SymbolKind
+from repomind.model import EdgeKind, IndexRunStatus, ScipStatus, SymbolKind, Tier
 from repomind.store.sqlite.graph import SqliteGraphStore
 from repomind.workspace import index_db_path, normalize_repo_path
 
@@ -32,8 +35,14 @@ def test_indexes_all_files_with_correct_symbol_counts(
         "method": 2,
         "variable": 2,
     }
-    # M1 does not extract edges yet -- the shape is present, every count is 0.
-    assert result.edge_counts == {"resolved": 0, "heuristic": 0, "inferred": 0}
+    # `resolved` stays 0 until SCIP lands (RM-022); `inferred` is unused in
+    # v1.0 entirely (features.md F-2 requirement 2). `heuristic` covers 9
+    # `defines` edges (one per non-file symbol: Widget, count, __init__,
+    # render, make_widget, _private_helper, build_default, DEFAULT_NAME,
+    # main) plus 9 cross-reference edges -- see
+    # test_specific_cross_file_edges_resolve_correctly below for what
+    # those actually are, rather than asserting a bare count here alone.
+    assert result.edge_counts == {"resolved": 0, "heuristic": 18, "inferred": 0}
     assert result.repo.scip_status == ScipStatus.SKIPPED
     assert result.index_run.status == IndexRunStatus.OK
     assert result.index_run.files_done == result.index_run.files_total == 4
@@ -74,22 +83,93 @@ def test_symbol_spans_and_qualified_names_are_correct(
         store.close()
 
 
+def test_specific_cross_file_edges_resolve_correctly(
+    isolated_workspace: Path, simple_fixture_repo: Path
+) -> None:
+    """Not just a count: the pipeline must actually wire resolve.py's rules
+    up to real, verifiable relationships in this fixture. Each assertion
+    below is independently checkable by reading the fixture source
+    (tests/fixtures/simple/) -- see script.py, pkg/module_b.py,
+    pkg/module_a.py.
+    """
+    index_repository(simple_fixture_repo)
+
+    root_path = normalize_repo_path(simple_fixture_repo)
+    store = SqliteGraphStore(index_db_path(root_path))
+    try:
+        repo = store.get_repo_by_path(root_path)
+        assert repo is not None and repo.id is not None
+
+        def qname(name: str) -> int:
+            sym = store.find_symbol_by_qualified_name(repo.id, name)
+            assert sym is not None and sym.id is not None, name
+            return sym.id
+
+        def kinds_to(target: str) -> set[EdgeKind]:
+            edges = store.edges_to(qname(target), tiers=(Tier.HEURISTIC,))
+            return {e.kind for e in edges}
+
+        def sources_of_kind(target: str, kind: EdgeKind) -> set[int]:
+            edges = store.edges_to(qname(target), kind=kind, tiers=(Tier.HEURISTIC,))
+            return {e.src_symbol_id for e in edges}
+
+        # script.main() calls pkg.module_b.build_default() (cross-file, via
+        # `from pkg.module_b import build_default`).
+        assert qname("script.main") in sources_of_kind("pkg.module_b.build_default", EdgeKind.CALLS)
+
+        # pkg.module_b.build_default() calls pkg.module_a.make_widget()
+        # (cross-file, resolved via module_b's own same-file import).
+        assert qname("pkg.module_b.build_default") in sources_of_kind(
+            "pkg.module_a.make_widget", EdgeKind.CALLS
+        )
+
+        # The module-to-module import edges themselves.
+        assert qname("pkg.module_b") in sources_of_kind("pkg.module_a.Widget", EdgeKind.IMPORTS)
+        assert qname("script") in sources_of_kind(
+            "pkg.module_b.build_default", EdgeKind.IMPORTS
+        )
+
+        # make_widget's return-type annotation (`-> Widget`) is a REFERENCES
+        # edge, distinct from the CALLS edge its `return Widget(name)` body
+        # separately produces -- both point at the same symbol.
+        assert EdgeKind.REFERENCES in kinds_to("pkg.module_a.Widget")
+        assert EdgeKind.CALLS in kinds_to("pkg.module_a.Widget")
+
+        # `Widget.render()` is never called via a resolvable target anywhere
+        # in this fixture (script.py's `widget.render()` needs type
+        # inference the heuristic tier deliberately does not attempt) --
+        # confirms the resolver's restraint, not just its reach. It still
+        # has exactly one incoming edge: Widget's own DEFINES of it.
+        incoming = store.edges_to(qname("pkg.module_a.Widget.render"))
+        assert {e.kind for e in incoming} == {EdgeKind.DEFINES}
+
+        # `defines`: Widget defines its own method render.
+        assert qname("pkg.module_a.Widget") in sources_of_kind(
+            "pkg.module_a.Widget.render", EdgeKind.DEFINES
+        )
+    finally:
+        store.close()
+
+
 def test_reindex_is_idempotent(isolated_workspace: Path, simple_fixture_repo: Path) -> None:
     first = index_repository(simple_fixture_repo)
     second = index_repository(simple_fixture_repo)
 
     assert first.symbol_counts == second.symbol_counts
     assert first.files_indexed == second.files_indexed
+    assert first.edge_counts == second.edge_counts
 
     # Re-indexing does not accumulate duplicate rows -- replace_symbols
-    # deletes-then-inserts per file, so a symbol count doubling would mean
-    # that guarantee broke.
+    # deletes-then-inserts per file, and _index_one_file's
+    # delete_edges_from_file mirrors that for edges, so a count doubling
+    # would mean either guarantee broke.
     root_path = normalize_repo_path(simple_fixture_repo)
     store = SqliteGraphStore(index_db_path(root_path))
     try:
         repo = store.get_repo_by_path(root_path)
         assert repo is not None and repo.id is not None
         assert store.count_symbols_by_kind(repo.id) == first.symbol_counts
+        assert store.count_edges_by_tier(repo.id) == first.edge_counts
     finally:
         store.close()
 

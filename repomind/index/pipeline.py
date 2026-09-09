@@ -1,10 +1,23 @@
-"""Index pipeline orchestration: discover -> parse -> persist.
+"""Index pipeline orchestration: discover -> parse -> resolve -> persist.
 
-RM-018. M1 scope only, per implementation-plan.md's staged delivery:
-symbols in a database. No edges (RM-020 onward, M2), no chunks or
-embeddings (RM-030 onward, M3), no SCIP (RM-022, time-boxed, also M2).
-``repo.scip_status`` is set to SKIPPED here, not because SCIP failed, but
-because this pipeline does not attempt it yet.
+RM-018 (symbols) + RM-020/RM-021 (edges). Still M2 scope only, per
+implementation-plan.md's staged delivery: symbols plus ``heuristic``-tier
+edges. No chunks or embeddings yet (RM-030 onward, M3), and no SCIP yet
+(RM-022, time-boxed, also M2) -- ``repo.scip_status`` stays SKIPPED here,
+not because SCIP failed, but because this pipeline does not attempt it
+yet.
+
+Edge computation happens in two passes, for the reason design.md's own
+flow diagram separates them:
+
+  * ``defines`` edges are computed *per file*, right after that file's
+    symbols are persisted (``_index_one_file``) -- both ends are already
+    known within that one file (``ParsedSymbol.parent_qualified_name``),
+    so there is nothing to gain by waiting.
+  * Every other kind (imports, inherits, calls, references) needs the
+    *whole repo's* symbol table, since a reference routinely crosses file
+    boundaries -- these are deferred to one pass after every file has been
+    parsed and persisted (``_run``, calling ``resolve_heuristic_edges``).
 
 Resumability, stated precisely (F-1 requirement 9: "a re-run resumes
 rather than restarting"): this pipeline's notion of resumability is
@@ -28,6 +41,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING
 
 from repomind.errors import IndexingError
+from repomind.index.resolve import defines_edges_for_file, resolve_heuristic_edges
 from repomind.ingest.discover import discover_files
 from repomind.ingest.git import current_sha
 from repomind.languages import get_language_pack_for_extension
@@ -39,7 +53,7 @@ if TYPE_CHECKING:
     from collections.abc import Callable
 
     from repomind.languages.base import LanguagePack
-    from repomind.model import IndexRun
+    from repomind.model import IndexRun, ParsedReference
 
 
 @dataclasses.dataclass(frozen=True, slots=True)
@@ -67,8 +81,10 @@ class IndexResult:
     dirs, size cap, .gitignore) -- those never reach this count at all."""
     symbol_counts: dict[str, int]
     edge_counts: dict[str, int]
-    """All zero in M1 -- no edge extraction yet. Present now so this
-    result's shape doesn't change once M2 lands."""
+    """Keyed by tier (``resolved``/``heuristic``/``inferred``), per
+    design.md section 4.3 -- never merged. ``resolved`` is always 0 until
+    RM-022 lands; ``heuristic`` now reflects real ``defines`` and
+    resolved-reference edges (RM-020/RM-021)."""
     elapsed_seconds: float
 
 
@@ -116,6 +132,11 @@ def _run(
 
     files_indexed = 0
     files_skipped = 0
+    # (file_id, references) per successfully-parsed file, retained across
+    # the loop for the whole-repo resolution pass below -- resolving a
+    # reference needs the complete symbol table, which does not exist
+    # until every file has been persisted. See this module's docstring.
+    file_references: list[tuple[int, list[ParsedReference]]] = []
     try:
         for i, disc in enumerate(discovered, start=1):
             pack = get_language_pack_for_extension(disc.abs_path.suffix)
@@ -129,7 +150,10 @@ def _run(
                     files_skipped += 1
                 else:
                     blob_sha = hashlib.sha256(raw).hexdigest()
-                    _index_one_file(store, repo.id, disc.rel_path, text, blob_sha, pack)
+                    file_id, references = _index_one_file(
+                        store, repo.id, disc.rel_path, text, blob_sha, pack
+                    )
+                    file_references.append((file_id, references))
                     files_indexed += 1
 
             store.update_index_run_progress(run.id, i)
@@ -139,6 +163,13 @@ def _run(
                         files_done=i, files_total=len(discovered), current_path=disc.rel_path
                     )
                 )
+
+        # Whole-repo pass: every kind of edge except `defines` (already
+        # computed per file above) needs the complete symbol table, since a
+        # reference routinely crosses file boundaries.
+        all_symbols = store.all_symbols(repo.id)
+        heuristic_edges = resolve_heuristic_edges(repo.id, all_symbols, file_references)
+        store.insert_edges(heuristic_edges)
 
         store.set_repo_indexed_sha(repo.id, to_sha, ScipStatus.SKIPPED)
         store.finish_index_run(run.id, IndexRunStatus.OK)
@@ -170,7 +201,11 @@ def _index_one_file(
     text: str,
     blob_sha: str,
     pack: LanguagePack,
-) -> None:
+) -> tuple[int, list[ParsedReference]]:
+    """Parse, persist this file's symbols and ``defines`` edges, and return
+    ``(file_id, references)`` for the caller's deferred whole-repo
+    resolution pass (see this module's docstring).
+    """
     # Path(...), not PurePosixPath: pathlib.Path accepts "/" as a separator
     # on every platform including Windows, and parse_python_file normalises
     # back to forward slashes itself via .as_posix() -- so a plain Path
@@ -190,6 +225,14 @@ def _index_one_file(
     )
     assert file_row.id is not None  # upsert_file always assigns one
 
+    # Clears both this file's own `defines` edges and any edge from an
+    # earlier run whose *evidence* pointed here (a call/import/etc. found
+    # in this file's source, regardless of which file the target symbol
+    # lives in) -- so re-indexing this same file on a later run does not
+    # accumulate duplicates or leave a stale edge from source that changed.
+    # Symmetric with replace_symbols' own idempotency, just below.
+    store.delete_edges_from_file(file_row.id)
+
     symbols = [
         Symbol(
             repo_id=repo_id,
@@ -204,4 +247,9 @@ def _index_one_file(
         )
         for ps in parsed.symbols
     ]
-    store.replace_symbols(file_row.id, symbols)
+    persisted = store.replace_symbols(file_row.id, symbols)
+
+    defines = defines_edges_for_file(repo_id, file_row.id, parsed.symbols, persisted)
+    store.insert_edges(defines)
+
+    return file_row.id, parsed.references

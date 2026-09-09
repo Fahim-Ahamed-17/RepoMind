@@ -10,10 +10,13 @@ would ship a broken command.
 The full CLI surface (``ask``, ``search``, ``refs``, ``impact``, ``graph``,
 ``list``, ``status``, ``serve``, ``--json`` on every read command, exit
 codes) is RM-045 in M4. Building that now would mean either faking
-commands that call into pipelines which do not exist yet (M2's edges,
-M3's retrieval, M4's synthesis) or inventing their shape ahead of the
-tickets that actually determine it -- both are exactly what AGENTS.md's
-"Rule zero" says not to do.
+commands that call into pipelines which do not exist yet (M3's retrieval,
+M4's synthesis) or inventing their shape ahead of the tickets that
+actually determine it -- both are exactly what AGENTS.md's "Rule zero"
+says not to do. A later milestone may add one more command early, the
+same way this file already does for ``index``, purely to keep that
+milestone's own exit criterion checkable -- not the full surface F-7 (or
+any other feature) eventually specifies.
 """
 
 from __future__ import annotations
@@ -53,11 +56,13 @@ def index(
         Path(), help="Repository to index. Defaults to the current directory."
     ),
 ) -> None:
-    """Index a Python repository: parse it and persist its symbols.
+    """Index a Python repository: parse it and persist its symbols and
+    relationships.
 
-    M1 scope only -- symbols, not yet relationships (M2), search (M3), or
-    answers (M4). Always local: this command makes no network connection
-    at any point (AGENTS.md invariant 1).
+    M1+M2 scope so far -- symbols and heuristic-tier edges, not yet search
+    (M3) or answers (M4); the `resolved` tier needs SCIP (RM-022, not yet
+    landed). Always local: this command makes no network connection at
+    any point (AGENTS.md invariant 1).
     """
     # Output below is deliberately ASCII-only. Rich's legacy Windows console
     # writer (the code path older cmd.exe-style terminals take) can fail
@@ -101,7 +106,9 @@ def index(
         "  symbols:  " + ", ".join(f"{k}={v}" for k, v in result.symbol_counts.items() if v)
     )
     edges_summary = ", ".join(f"{k}={v}" for k, v in result.edge_counts.items())
-    console.print(f"  edges:    {edges_summary}  [dim](edge extraction lands in M2)[/dim]")
+    console.print(
+        f"  edges:    {edges_summary}  [dim](resolved tier requires SCIP -- RM-022)[/dim]"
+    )
     console.print(f"  SHA:      {result.repo.indexed_sha or '[dim]none (not a git repo)[/dim]'}")
 
 
