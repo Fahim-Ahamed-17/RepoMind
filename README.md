@@ -19,7 +19,7 @@ Indexing is always local and requires no LLM. Your repository is never uploaded.
 |---|---|
 | 1 — Idea validation | ✅ Complete — verdict: *validated, conditional on scope discipline* |
 | 2 — System design | ✅ Complete — [`docs/design.md`](docs/design.md), awaiting approval |
-| 3 — Feature definition | Not started |
+| 3 — Feature definition | ✅ Complete — [`docs/features.md`](docs/features.md), awaiting approval |
 | 4 — Implementation plan | Not started |
 
 No code exists yet. This repository currently holds planning and design documents only.
@@ -30,6 +30,7 @@ No code exists yet. This repository currently holds planning and design document
 |---|---|
 | [`docs/project-document.md`](docs/project-document.md) | **Canonical project document.** Validation findings, positioning, scope, architecture direction, evaluation strategy, risks, success criteria |
 | [`docs/design.md`](docs/design.md) | **System design (Phase 2).** Architecture, module breakdown, data model, interfaces, 9 architectural decisions with alternatives and trade-offs, security, failure handling, scalability |
+| [`docs/features.md`](docs/features.md) | **Feature specification (Phase 3).** 28 features across MVP, post-MVP, and future, with purpose, user value, functional requirements, dependencies, technical implications, and priority |
 | [`docs/project-document.docx`](docs/project-document.docx) | Word version of the above, for sharing. *Generated from the Markdown — edit the Markdown, not this* |
 | [`docs/archive/original-project-idea.docx`](docs/archive/original-project-idea.docx) | The original project idea, kept for provenance. Superseded, retained deliberately so the reasoning behind the changes stays visible |
 
