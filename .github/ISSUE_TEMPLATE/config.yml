@@ -1,0 +1,5 @@
+blank_issues_enabled: true
+contact_links:
+  - name: Design rationale
+    url: https://github.com/OWNER/repomind/blob/main/docs/design.md
+    about: Nine architectural decisions with alternatives and trade-offs. Check here before proposing a change to the architecture.

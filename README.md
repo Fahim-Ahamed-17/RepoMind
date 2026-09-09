@@ -20,9 +20,12 @@ Indexing is always local and requires no LLM. Your repository is never uploaded.
 | 1 — Idea validation | ✅ Complete — verdict: *validated, conditional on scope discipline* |
 | 2 — System design | ✅ Complete — [`docs/design.md`](docs/design.md), awaiting approval |
 | 3 — Feature definition | ✅ Complete — [`docs/features.md`](docs/features.md), awaiting approval |
-| 4 — Implementation plan | Not started |
+| 4 — Implementation plan | ✅ Complete — [`docs/implementation-plan.md`](docs/implementation-plan.md) |
 
-No code exists yet. This repository currently holds planning and design documents only.
+No feature code exists yet. The repository holds specifications plus tooling and CI
+scaffolding, ready for implementation to begin at ticket RM-010.
+
+Contributing: [CONTRIBUTING.md](CONTRIBUTING.md) · AI agents: [AGENTS.md](AGENTS.md)
 
 ## Documents
 
@@ -31,6 +34,9 @@ No code exists yet. This repository currently holds planning and design document
 | [`docs/project-document.md`](docs/project-document.md) | **Canonical project document.** Validation findings, positioning, scope, architecture direction, evaluation strategy, risks, success criteria |
 | [`docs/design.md`](docs/design.md) | **System design (Phase 2).** Architecture, module breakdown, data model, interfaces, 9 architectural decisions with alternatives and trade-offs, security, failure handling, scalability |
 | [`docs/features.md`](docs/features.md) | **Feature specification (Phase 3).** 28 features across MVP, post-MVP, and future, with purpose, user value, functional requirements, dependencies, technical implications, and priority |
+| [`docs/implementation-plan.md`](docs/implementation-plan.md) | **Implementation plan (Phase 4).** Milestones with exit criteria, ~45 tickets with dependencies and estimates, testing and deployment strategy, risks, MVP-to-production evolution |
+| [`docs/conventions.md`](docs/conventions.md) | Code conventions: style, structure, errors, logging, SQL, testing, git |
+| [`AGENTS.md`](AGENTS.md) | Instructions for AI agents — invariants, commands, working style |
 | [`docs/project-document.docx`](docs/project-document.docx) | Word version of the above, for sharing. *Generated from the Markdown — edit the Markdown, not this* |
 | [`docs/archive/original-project-idea.docx`](docs/archive/original-project-idea.docx) | The original project idea, kept for provenance. Superseded, retained deliberately so the reasoning behind the changes stays visible |
 
