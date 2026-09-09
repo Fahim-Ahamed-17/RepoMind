@@ -32,3 +32,6 @@ Thumbs.db
 
 # Office lock files
 ~$*
+
+# repomind's own runtime workspace, never the source tree's concern
+.repomind-dev/

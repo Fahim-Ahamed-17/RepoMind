@@ -118,7 +118,17 @@ disallow_any_explicit = false     # allowed, but each use needs a comment
 plugins = []
 
 [[tool.mypy.overrides]]
-module = ["sqlite_vec.*", "sentence_transformers.*", "tree_sitter_*", "mcp.*"]
+module = [
+    "sqlite_vec.*",
+    "sentence_transformers.*",
+    "tree_sitter",
+    "tree_sitter.*",
+    "tree_sitter_python",
+    "tree_sitter_python.*",
+    "tree_sitter_typescript",
+    "tree_sitter_typescript.*",
+    "mcp.*",
+]
 ignore_missing_imports = true
 
 [[tool.mypy.overrides]]
