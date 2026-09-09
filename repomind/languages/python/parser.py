@@ -73,9 +73,20 @@ def _file_qualified_name(rel_path: str) -> str:
     """The dotted import name a Python file would have, e.g.
     ``repomind/store/base.py`` -> ``repomind.store.base``, and an
     ``__init__.py`` -> its containing package's own name.
+
+    A root-level ``__init__.py`` (no containing directory at all -- the
+    indexed repo's own root *is* the package) has nothing left to strip
+    the ``__init__`` segment down to. Found via a real fixture
+    (tests/fixtures/cyclic, whose own ``__init__.py`` sits at its root)
+    rather than by inspection: the naive fallback returned the literal
+    string ``"__init__.py"`` -- extension and all, not even a dotted name
+    -- which silently broke every qualified-name lookup for that one
+    file's own symbol. Falling back to the bare ``"__init__"`` (already
+    ``.py``-stripped) instead keeps this function's contract -- always a
+    plain dotted name, never a raw path -- true in every case.
     """
     parts = rel_path.removesuffix(".py").split("/")
-    if parts and parts[-1] == "__init__":
+    if len(parts) > 1 and parts[-1] == "__init__":
         parts = parts[:-1]
     return ".".join(parts) if parts else rel_path
 

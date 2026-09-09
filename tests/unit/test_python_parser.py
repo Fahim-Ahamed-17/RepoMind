@@ -26,6 +26,17 @@ def test_init_py_qualified_name_is_the_package_itself() -> None:
     assert pf.symbols[0].qualified_name == "pkg.sub"
 
 
+def test_root_level_init_py_qualified_name_is_bare_init_not_the_raw_path() -> None:
+    """The indexed repo's own root can itself be a package, with no
+    containing directory to strip __init__ down to -- found via
+    tests/fixtures/cyclic's own __init__.py, whose qualified name silently
+    came out as the literal ``"__init__.py"`` (path, extension and all,
+    not a dotted name) before this was fixed.
+    """
+    pf = _parse("x = 1\n", path="__init__.py")
+    assert pf.symbols[0].qualified_name == "__init__"
+
+
 def test_class_and_method_kinds_and_nesting() -> None:
     pf = _parse("class Outer:\n    class Inner:\n        def method(self):\n            pass\n")
     outer = _by_qname(pf, "m.Outer")

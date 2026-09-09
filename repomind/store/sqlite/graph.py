@@ -382,6 +382,68 @@ class SqliteGraphStore:
         ).fetchall()
         return [_row_to_edge(r) for r in rows]
 
+    def reverse_dependencies(
+        self,
+        symbol_id: int,
+        max_depth: int,
+        tiers: Sequence[Tier] | None = None,
+    ) -> Sequence[tuple[Edge, int]]:
+        # UNION (not UNION ALL) dedups the CTE's rows by their full
+        # (symbol_id, depth, edge_id) tuple. Combined with the hard
+        # `depth < max_depth` bound, that is what makes a cyclic import
+        # graph terminate rather than hang: a cycle can still revisit the
+        # same symbol at a *different* depth (a new, undeduped row), but
+        # never at the same (symbol, depth, edge) triple twice, and the
+        # depth bound caps how many times that can happen at all. See
+        # design.md section 4.4 -- this is that query, with `edge_id`
+        # threaded through so the caller gets real edges back, not bare
+        # ids, and reads out a full row per (symbol, depth) rather than a
+        # single edge lost to whichever one happened to insert first.
+        tier_clause = ""
+        params: list[object] = [symbol_id, max_depth]
+        if tiers:
+            placeholders = ",".join("?" for _ in tiers)
+            tier_clause = f"AND e.tier IN ({placeholders})"
+            params.extend(t.value for t in tiers)
+
+        rows = self._conn.execute(
+            f"""
+            WITH RECURSIVE upstream(symbol_id, depth, edge_id) AS (
+                SELECT ?, 0, NULL
+              UNION
+                SELECT e.src_symbol_id, u.depth + 1, e.id
+                FROM edge e
+                JOIN upstream u ON e.dst_symbol_id = u.symbol_id
+                WHERE u.depth < ?
+                  {tier_clause}
+            )
+            SELECT edge.*, u.depth AS hop_depth
+            FROM upstream u
+            JOIN edge ON edge.id = u.edge_id
+            WHERE u.depth > 0
+              AND u.depth = (
+                  SELECT MIN(u2.depth) FROM upstream u2 WHERE u2.symbol_id = u.symbol_id
+              )
+              -- A diamond (A -> B -> D and A -> C -> D) reaches A via two
+              -- *different* edges (A->B, A->C) at the same shortest depth
+              -- and the same kind -- collapse those to one representative
+              -- (lowest edge id, for determinism), since both say the same
+              -- thing about A's relationship to the seed. A different KIND
+              -- from the same symbol at the same depth is not collapsed:
+              -- "A imports B" and "A calls B" are genuinely distinct facts.
+              AND edge.id = (
+                  SELECT MIN(e3.id) FROM upstream u3
+                  JOIN edge e3 ON e3.id = u3.edge_id
+                  WHERE u3.symbol_id = u.symbol_id
+                    AND u3.depth = u.depth
+                    AND e3.kind = edge.kind
+              )
+            ORDER BY u.depth, edge.src_symbol_id, edge.kind
+            """,  # noqa: S608 -- tier_clause interpolates only "?" placeholders, never a value
+            params,
+        ).fetchall()
+        return [(_row_to_edge(r), r["hop_depth"]) for r in rows]
+
     def count_edges_by_tier(self, repo_id: int) -> dict[str, int]:
         counts = {t.value: 0 for t in Tier}
         rows = self._conn.execute(

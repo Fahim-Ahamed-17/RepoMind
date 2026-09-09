@@ -171,6 +171,56 @@ class GraphStore(Protocol):
         """
         ...
 
+    def reverse_dependencies(
+        self,
+        symbol_id: int,
+        max_depth: int,
+        tiers: Sequence[Tier] | None = None,
+    ) -> Sequence[tuple[Edge, int]]:
+        """Everything that transitively depends on ``symbol_id`` -- "what
+        calls this", walked backward through the graph -- as
+        ``(edge, depth)`` pairs, ``depth`` counting hops from ``symbol_id``
+        (a direct caller is depth 1).
+
+        RM-024, built on ``edges_to`` above rather than replacing it: this
+        is the multi-hop recursive-CTE traversal design.md section 4.4
+        describes and that :class:`GraphStore`'s own module docstring
+        named as deliberately out of scope for RM-012. Implements design's
+        cycle-safety requirement by construction (a cyclic repo must not
+        hang this query) and reports, for each reachable symbol, one edge
+        per *kind* on a shortest path to it -- a symbol also reachable by
+        a longer route does not additionally appear at that longer depth,
+        and a symbol reachable by two different same-kind routes at the
+        *same* shortest depth (a diamond: A->B->D and A->C->D both put A
+        two hops from D) appears once per kind, not once per route. A
+        different kind from the same symbol at the same depth is not
+        collapsed -- "A imports B" and "A calls B" are distinct facts even
+        at the same distance.
+
+        Every edge kind can appear here, not only ``calls`` -- an
+        ``imports``, ``inherits``, or ``references`` edge is just as much
+        "this depends on that" for the purpose of "what would this
+        change affect". F-8's impact analysis (M8) is built on exactly
+        this same primitive with different seeding, not a separate query.
+
+        Deliberately one-directional (reverse only): nothing in F-7 or F-8
+        needs the forward direction ("what does this call"), and
+        ``edges_from`` already answers that at a single hop, which is all
+        either feature specifies. Depth is the caller's responsibility to
+        cap sensibly (F-7 requirement 2: default 1, capped at 4) --
+        unbounded here would defeat the "no unbounded query" rule this
+        file states for everything else.
+
+        A cyclic dependency graph never re-lists ``symbol_id`` itself,
+        even though a genuine cycle (A -> B -> C -> A) does mean A
+        transitively depends on itself: the seed occupies depth 0, which
+        always wins the shortest-path comparison for its own id, so any
+        longer cycle-induced path back to it never displaces that. A "what
+        calls A" result listing A among the callers would read as a
+        confusing implementation artifact, not a fact about the code.
+        """
+        ...
+
     def count_edges_by_tier(self, repo_id: int) -> dict[str, int]:
         """For the index-completion summary and ``repomind status``
         (F-1 requirement 6, F-2 requirement 5)."""

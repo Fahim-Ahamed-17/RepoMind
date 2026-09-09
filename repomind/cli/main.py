@@ -27,8 +27,12 @@ import typer
 from rich.console import Console
 from rich.progress import BarColumn, Progress, TextColumn
 
+from repomind.analyze.reverse import DEFAULT_DEPTH, MAX_DEPTH, find_references
 from repomind.errors import RepoMindError
 from repomind.index.pipeline import IndexProgress, index_repository
+from repomind.model import Tier
+from repomind.store.sqlite.graph import SqliteGraphStore
+from repomind.workspace import index_db_path, normalize_repo_path
 
 app = typer.Typer(
     name="repomind",
@@ -110,6 +114,74 @@ def index(
         f"  edges:    {edges_summary}  [dim](resolved tier requires SCIP -- RM-022)[/dim]"
     )
     console.print(f"  SHA:      {result.repo.indexed_sha or '[dim]none (not a git repo)[/dim]'}")
+
+
+@app.command()
+def refs(
+    symbol: str = typer.Argument(
+        ..., help="Qualified name (pkg.mod.Class.method) or path/to/file.py:line."
+    ),
+    depth: int = typer.Option(
+        DEFAULT_DEPTH, "--depth", help=f"Hops to walk transitively, clamped to 1-{MAX_DEPTH}."
+    ),
+    tier: str | None = typer.Option(
+        None, "--tier", help="Restrict to one confidence tier (resolved/heuristic/inferred)."
+    ),
+) -> None:
+    """List what depends on SYMBOL: its callers and referrers, grouped by
+    confidence tier, with the source location each relationship was found
+    at (F-7). Operates on the current directory's already-built index --
+    run `repomind index .` first. Requires no LLM (AGENTS.md invariant 5).
+    """
+    root = Path.cwd()
+    root_path_str = normalize_repo_path(root)
+    db_path = index_db_path(root_path_str)
+    if not db_path.exists():
+        console.print(f"[red]error:[/red] {root} has not been indexed yet. Run `repomind index .`")
+        raise typer.Exit(code=1)
+
+    store = SqliteGraphStore(db_path)
+    try:
+        repo = store.get_repo_by_path(root_path_str)
+        if repo is None or repo.id is None:
+            console.print(
+                f"[red]error:[/red] {root} has not been indexed yet. Run `repomind index .`"
+            )
+            raise typer.Exit(code=1)
+
+        tiers: tuple[Tier, ...] | None = None
+        if tier is not None:
+            try:
+                tiers = (Tier(tier),)
+            except ValueError:
+                valid = ", ".join(t.value for t in Tier)
+                console.print(f"[red]error:[/red] --tier must be one of: {valid}")
+                raise typer.Exit(code=1) from None
+
+        result = find_references(store, repo.id, symbol, depth=depth, tiers=tiers)
+        if result is None:
+            console.print(f"[red]error:[/red] no symbol found matching {symbol!r}")
+            raise typer.Exit(code=1)
+
+        if not result.hits:
+            console.print(f"nothing depends on [bold]{result.target.qualified_name}[/bold]")
+            return
+
+        console.print(f"what depends on [bold]{result.target.qualified_name}[/bold]:")
+        for hit_tier, hits in result.by_tier().items():
+            console.print(f"\n[bold]{hit_tier.value}[/bold] ({len(hits)}):")
+            for hit in hits:
+                loc = (
+                    f"{hit.evidence_path}:{hit.evidence_line}"
+                    if hit.evidence_path is not None
+                    else "(no evidence location)"
+                )
+                console.print(
+                    f"  depth={hit.depth}  {hit.source.qualified_name}"
+                    f"  [dim]({hit.kind.value}, {loc})[/dim]"
+                )
+    finally:
+        store.close()
 
 
 if __name__ == "__main__":

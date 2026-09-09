@@ -28,6 +28,17 @@ def simple_fixture_repo() -> Path:
     exercises the filesystem-walk discovery path (no .git directory of its
     own) end to end: a package with __init__.py, a class with a method and
     a class-level variable, module-level functions, and a cross-module
-    import (not yet resolved into an edge -- that's M2).
+    import resolved into real heuristic-tier edges (RM-020/RM-021).
     """
     return Path(__file__).parent / "fixtures" / "simple"
+
+
+@pytest.fixture
+def cyclic_fixture_repo() -> Path:
+    """Genuinely circular imports (a.py <-> b.py, both importing and
+    calling into each other) plus a three-level inheritance chain
+    (Animal -> Dog -> Puppy) -- the graph edge cases RM-024's traversal
+    must not hang on. See docs/conventions.md's fixture plan and
+    tests/fixtures/cyclic/__init__.py.
+    """
+    return Path(__file__).parent / "fixtures" / "cyclic"
