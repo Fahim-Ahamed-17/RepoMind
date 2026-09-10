@@ -48,6 +48,62 @@ def test_registered_but_deleted_repo_reports_stale_not_error(
     assert entries[0].exists is False
 
 
+def test_workspace_dir_size_sums_every_file_in_the_workspace(isolated_workspace: Path) -> None:
+    d = workspace.repo_workspace_dir("/tmp/proj")
+    d.mkdir(parents=True)
+    (d / "index.db").write_bytes(b"x" * 100)
+    (d / "index.scip").write_bytes(b"y" * 50)
+
+    assert workspace.workspace_dir_size("/tmp/proj") == 150
+
+
+def test_workspace_dir_size_is_zero_for_a_repo_never_indexed(isolated_workspace: Path) -> None:
+    assert workspace.workspace_dir_size("/tmp/never-indexed") == 0
+
+
+def test_remove_repo_workspace_deletes_files_and_unregisters(isolated_workspace: Path) -> None:
+    workspace.register_repo("/tmp/proj")
+    d = workspace.repo_workspace_dir("/tmp/proj")
+    d.mkdir(parents=True)
+    (d / "index.db").write_bytes(b"data")
+
+    removed = workspace.remove_repo_workspace("/tmp/proj")
+
+    assert removed is True
+    assert not d.exists()
+    assert workspace.list_registered_repos() == []
+
+
+def test_remove_repo_workspace_reports_false_when_nothing_to_remove(
+    isolated_workspace: Path,
+) -> None:
+    workspace.register_repo("/tmp/proj")  # registered, but never actually indexed
+
+    removed = workspace.remove_repo_workspace("/tmp/proj")
+
+    assert removed is False
+    assert workspace.list_registered_repos() == []  # the stale entry is still cleared
+
+
+def test_remove_repo_workspace_refuses_while_a_live_process_holds_the_lock(
+    isolated_workspace: Path,
+) -> None:
+    d = workspace.repo_workspace_dir("/tmp/proj")
+    d.mkdir(parents=True)
+    (d / "index.db").write_bytes(b"data")
+    workspace.register_repo("/tmp/proj")
+
+    with (
+        workspace.index_lock("/tmp/proj"),
+        pytest.raises(Exception, match=r"PID \d+"),
+    ):
+        workspace.remove_repo_workspace("/tmp/proj")
+
+    # Refused, not partially applied: still registered, files still there.
+    assert d.exists()
+    assert len(workspace.list_registered_repos()) == 1
+
+
 def test_index_lock_blocks_concurrent_acquisition_by_a_live_process(
     isolated_workspace: Path,
 ) -> None:

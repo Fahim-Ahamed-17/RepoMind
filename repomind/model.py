@@ -226,15 +226,61 @@ class ParsedSymbol:
     end_line: int
     signature: str | None = None
     docstring: str | None = None
+    parent_qualified_name: str | None = None
+    """The qualified name of this symbol's immediate containing scope
+    (module, class, or function), or ``None`` for the file symbol itself,
+    which has no parent. RM-020: this is exactly the pair a ``defines``
+    edge needs, and both ends are already known within the single file
+    being parsed -- no cross-file resolution required, unlike every other
+    edge kind. See :class:`ParsedReference` for those.
+    """
+
+
+@dataclass(frozen=True, slots=True)
+class ParsedReference:
+    """A raw, syntactic reference extracted from source, not yet resolved to
+    a target symbol.
+
+    RM-020 produces these; the heuristic resolver (``index/resolve.py``,
+    RM-021) is what turns a ``ParsedReference`` into a :class:`Edge` row, by
+    matching ``target_text`` against the repo's known symbols -- name and
+    scope matching, per design.md's flow diagram ("heuristic resolver ->
+    heuristic edges"). A reference that cannot be matched to anything simply
+    produces no edge; that is the heuristic tier's expected failure mode; it
+    is not this type's job to guarantee resolvability, only to record what
+    was written in source. Yields the ``resolved`` tier's reason to exist.
+    """
+
+    kind: EdgeKind
+    """One of CALLS, IMPORTS, INHERITS, REFERENCES -- never DEFINES (that is
+    computed directly from :attr:`ParsedSymbol.parent_qualified_name`, needs
+    no matching) and never TESTS (F-8's job, M8, not M2)."""
+
+    src_qualified_name: str
+    """The symbol this reference originates from -- the enclosing module,
+    class, function, or method at the point the reference appears."""
+
+    target_text: str
+    """The name exactly as written in source: ``"Base"``, ``"self.method"``,
+    ``"pkg.mod.func"``, ``"os.path"``. Unresolved -- matching this against
+    the repo's symbol table is entirely the resolver's job, not this type's.
+    """
+
+    evidence_line: int
+    """1-indexed. Where in the *source file* this reference appears --
+    distinct from ``src_qualified_name``'s own span, since a reference can
+    appear anywhere within its enclosing symbol's body."""
 
 
 @dataclass(frozen=True, slots=True)
 class ParsedFile:
-    """The result of parsing one file: its symbols, ready for persistence.
+    """The result of parsing one file: its symbols and raw references,
+    ready for persistence and resolution respectively.
 
-    Edge extraction is deliberately *not* part of this type -- M1 (RM-017,
-    RM-018) produces symbols only; edges are M2's job (RM-020 onward), per
-    implementation-plan.md's staged delivery of F-1/F-2.
+    ``references`` stays unresolved at this layer on purpose -- resolving a
+    reference to a target symbol needs the *whole repo's* symbol table
+    (an import or a call can easily cross file boundaries), which no
+    single-file parse has visibility into. See :class:`ParsedReference`.
     """
 
     path: str
@@ -242,3 +288,4 @@ class ParsedFile:
     blob_sha: str
     n_lines: int
     symbols: list[ParsedSymbol] = field(default_factory=list)
+    references: list[ParsedReference] = field(default_factory=list)

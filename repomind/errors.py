@@ -41,3 +41,14 @@ class SchemaVersionError(RepoMindError):
 
 class WorkspaceLockedError(RepoMindError):
     """Another process holds the advisory lock for this repo's workspace."""
+
+
+class ScipUnavailableError(RepoMindError):
+    """SCIP resolution could not run or produced nothing usable.
+
+    Always caught internally by index/pipeline.py (design.md AD-9): a
+    degraded run is not a failed run. Never crosses to a surface as an
+    exit code -- see docs/conventions.md's own worked example for this
+    exact situation ("scip-python not found on PATH; install it or pass
+    --no-scip"), which is what this message should read like.
+    """

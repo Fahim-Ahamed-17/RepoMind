@@ -18,6 +18,21 @@ env:
   ANTHROPIC_API_KEY: ""
 
 jobs:
+  detect-eval-harness:
+    name: Detect M6 eval harness
+    runs-on: ubuntu-latest
+    outputs:
+      exists: ${{ steps.check.outputs.exists }}
+    steps:
+      - uses: actions/checkout@v4
+      - id: check
+        run: |
+          if [ -f repomind/eval/qa.py ]; then
+            echo "exists=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "exists=false" >> "$GITHUB_OUTPUT"
+          fi
+
   quality:
     name: Lint, types, layers
     runs-on: ubuntu-latest
@@ -67,8 +82,16 @@ jobs:
   evaluation:
     name: Retrieval quality
     runs-on: ubuntu-latest
+    needs: detect-eval-harness
     # Retrieval regressions are invisible until someone notices answers got
-    # worse. This turns that into a build failure.
+    # worse. This turns that into a build failure -- once M6 lands the
+    # golden-set harness this job needs (docs/implementation-plan.md), not
+    # before: `eval.qa` not existing yet at this point in the build (M2) is
+    # expected, not a regression. Gated on a real file check
+    # (detect-eval-harness) rather than a milestone number or a manually
+    # flipped flag, so this job starts enforcing itself the moment M6 adds
+    # repomind/eval/qa.py -- no second workflow edit required.
+    if: needs.detect-eval-harness.outputs.exists == 'true'
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5

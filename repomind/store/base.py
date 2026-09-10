@@ -20,7 +20,7 @@ from __future__ import annotations
 from typing import TYPE_CHECKING, Protocol
 
 if TYPE_CHECKING:
-    from collections.abc import Iterable, Sequence
+    from collections.abc import Iterable, Mapping, Sequence
 
     from repomind.model import (
         Edge,
@@ -114,8 +114,38 @@ class GraphStore(Protocol):
         self, repo_id: int, file_id: int | None = None, limit: int = DEFAULT_LIST_LIMIT
     ) -> Sequence[Symbol]: ...
 
+    def all_symbols(self, repo_id: int) -> Sequence[Symbol]:
+        """Every symbol in the repo, uncapped.
+
+        RM-021: the one deliberate exception to this file's own "every
+        query is bounded" rule, stated as its own method rather than a
+        large ``limit`` passed to :meth:`list_symbols` so the exception is
+        named and searchable, not a magic number. Exists because heuristic
+        resolution genuinely needs the complete table -- a reference
+        routinely crosses file boundaries, so there is no page of results
+        that would be enough on its own. "Uncapped" is bounded in practice
+        by design.md section 11.1's own v1 targets (~50k symbols for a
+        ~5k-file repo); this stops being fine only past the scale where
+        :class:`GraphStore` itself needs revisiting (section 11.2).
+        """
+        ...
+
     def count_symbols_by_kind(self, repo_id: int) -> dict[str, int]:
         """For the index-completion summary (F-1 requirement 6)."""
+        ...
+
+    def set_symbol_scip_ids(self, scip_symbol_by_id: Mapping[int, str]) -> None:
+        """Backfill ``Symbol.scip_symbol`` on already-persisted rows, keyed
+        by ``Symbol.id``.
+
+        RM-022: symbols are always persisted by ``replace_symbols`` *before*
+        SCIP ever runs (SCIP resolution needs the whole repo's symbol table
+        to exist first, same ordering constraint as the heuristic
+        resolver). Updates rows in place rather than going through
+        ``replace_symbols`` again, which would delete and reinsert with new
+        ids -- silently orphaning any edge already persisted against the
+        old ones.
+        """
         ...
 
     # -- edge ----------------------------------------------------------
@@ -152,6 +182,56 @@ class GraphStore(Protocol):
     ) -> Sequence[Edge]:
         """Incoming edges (what depends on / references this symbol).
         The hot path for "what calls this" -- backed by ``idx_edge_dst``.
+        """
+        ...
+
+    def reverse_dependencies(
+        self,
+        symbol_id: int,
+        max_depth: int,
+        tiers: Sequence[Tier] | None = None,
+    ) -> Sequence[tuple[Edge, int]]:
+        """Everything that transitively depends on ``symbol_id`` -- "what
+        calls this", walked backward through the graph -- as
+        ``(edge, depth)`` pairs, ``depth`` counting hops from ``symbol_id``
+        (a direct caller is depth 1).
+
+        RM-024, built on ``edges_to`` above rather than replacing it: this
+        is the multi-hop recursive-CTE traversal design.md section 4.4
+        describes and that :class:`GraphStore`'s own module docstring
+        named as deliberately out of scope for RM-012. Implements design's
+        cycle-safety requirement by construction (a cyclic repo must not
+        hang this query) and reports, for each reachable symbol, one edge
+        per *kind* on a shortest path to it -- a symbol also reachable by
+        a longer route does not additionally appear at that longer depth,
+        and a symbol reachable by two different same-kind routes at the
+        *same* shortest depth (a diamond: A->B->D and A->C->D both put A
+        two hops from D) appears once per kind, not once per route. A
+        different kind from the same symbol at the same depth is not
+        collapsed -- "A imports B" and "A calls B" are distinct facts even
+        at the same distance.
+
+        Every edge kind can appear here, not only ``calls`` -- an
+        ``imports``, ``inherits``, or ``references`` edge is just as much
+        "this depends on that" for the purpose of "what would this
+        change affect". F-8's impact analysis (M8) is built on exactly
+        this same primitive with different seeding, not a separate query.
+
+        Deliberately one-directional (reverse only): nothing in F-7 or F-8
+        needs the forward direction ("what does this call"), and
+        ``edges_from`` already answers that at a single hop, which is all
+        either feature specifies. Depth is the caller's responsibility to
+        cap sensibly (F-7 requirement 2: default 1, capped at 4) --
+        unbounded here would defeat the "no unbounded query" rule this
+        file states for everything else.
+
+        A cyclic dependency graph never re-lists ``symbol_id`` itself,
+        even though a genuine cycle (A -> B -> C -> A) does mean A
+        transitively depends on itself: the seed occupies depth 0, which
+        always wins the shortest-path comparison for its own id, so any
+        longer cycle-induced path back to it never displaces that. A "what
+        calls A" result listing A among the callers would read as a
+        confusing implementation artifact, not a fact about the code.
         """
         ...
 
