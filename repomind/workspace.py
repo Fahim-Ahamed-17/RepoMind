@@ -16,6 +16,7 @@ import ctypes
 import hashlib
 import json
 import os
+import shutil
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
@@ -63,6 +64,23 @@ def index_db_path(root_path: str) -> Path:
 
 def lock_path(root_path: str) -> Path:
     return repo_workspace_dir(root_path) / "index.lock"
+
+
+def workspace_dir_size(root_path: str) -> int:
+    """Total bytes on disk for one repo's workspace directory --
+    ``index.db`` and its WAL/SHM sidecars, ``index.scip``, everything --
+    for ``repomind list``'s "size on disk" column (F-15 requirement 1) and
+    its total-usage summary (requirement 5). ``0`` if the repo was
+    registered but never actually indexed, or its directory is otherwise
+    gone -- not an error, since a registry entry outliving its data is
+    exactly what requirement 4 already treats as a normal, reportable
+    state (``RegistryEntry.exists`` is about the *source* repo, this is
+    about *our* copy).
+    """
+    d = repo_workspace_dir(root_path)
+    if not d.is_dir():
+        return 0
+    return sum(f.stat().st_size for f in d.rglob("*") if f.is_file())
 
 
 # -- registry ----------------------------------------------------------
@@ -123,6 +141,35 @@ def list_registered_repos() -> list[RegistryEntry]:
         )
         for v in _read_registry().values()
     ]
+
+
+def remove_repo_workspace(root_path: str) -> bool:
+    """``repomind remove`` (F-15 requirement 3): forget ``root_path``
+    entirely -- unregister it and delete its whole workspace directory,
+    index and every SCIP artifact alike, not just the database rows a
+    store-level delete would reach.
+
+    Held under the same advisory lock ``index_lock`` uses, so this
+    refuses (raising :class:`WorkspaceLockedError`) rather than delete out
+    from under a concurrently-running ``repomind index`` on the same repo.
+
+    Returns ``False`` if there was nothing on disk to remove (a
+    registered-but-never-indexed entry, or one whose data is already
+    gone) -- the stale registry entry is still unregistered in that case.
+    Unregistering only ever happens *after* a successful removal (or after
+    confirming there was nothing to remove) -- never before acquiring the
+    lock, so a concurrent indexer raising ``WorkspaceLockedError`` leaves
+    the registry untouched rather than forgetting a repo this call failed
+    to actually clean up.
+    """
+    d = repo_workspace_dir(root_path)
+    if not d.exists():
+        unregister_repo(root_path)
+        return False
+    with index_lock(root_path):
+        shutil.rmtree(d)
+    unregister_repo(root_path)
+    return True
 
 
 # -- advisory locking ----------------------------------------------------

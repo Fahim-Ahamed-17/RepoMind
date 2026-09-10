@@ -1,22 +1,19 @@
 """The CLI entry point.
 
-Deliberately minimal right now: just enough of ``repomind index`` to make
-M1's own exit criterion literally demonstrable (implementation-plan.md
-section 2: "`repomind index .` ... produces symbols with correct spans")
-and to give ``pyproject.toml``'s ``repomind = "repomind.cli.main:app"``
-console script something real to import -- without one, ``pip install -e .``
-would ship a broken command.
+Deliberately minimal: just enough of the surface to make each landed
+milestone's own exit criterion demonstrable (implementation-plan.md
+section 2), plus ``list``/``status``/``remove`` (F-15, RM-025) -- central
+storage (design.md AD-5) is unusable without a way to discover and manage
+what has been indexed, and F-15 depends only on RM-013 (M1), not on
+anything M3/M4 still has to build.
 
-The full CLI surface (``ask``, ``search``, ``refs``, ``impact``, ``graph``,
-``list``, ``status``, ``serve``, ``--json`` on every read command, exit
-codes) is RM-045 in M4. Building that now would mean either faking
-commands that call into pipelines which do not exist yet (M3's retrieval,
-M4's synthesis) or inventing their shape ahead of the tickets that
-actually determine it -- both are exactly what AGENTS.md's "Rule zero"
-says not to do. A later milestone may add one more command early, the
-same way this file already does for ``index``, purely to keep that
-milestone's own exit criterion checkable -- not the full surface F-7 (or
-any other feature) eventually specifies.
+The rest of the full CLI surface (``ask``, ``search``, ``impact``,
+``graph``, ``serve``, ``--json`` on every read command, exit codes) is
+RM-045 in M4. Building that now would mean either faking commands that
+call into pipelines which do not exist yet (M3's retrieval, M4's
+synthesis) or inventing their shape ahead of the tickets that actually
+determine it -- both are exactly what AGENTS.md's "Rule zero" says not to
+do.
 """
 
 from __future__ import annotations
@@ -27,12 +24,20 @@ import typer
 from rich.console import Console
 from rich.progress import BarColumn, Progress, TextColumn
 
+from repomind.analyze.registry import RepoListing, repo_listing, repo_status
 from repomind.analyze.reverse import DEFAULT_DEPTH, MAX_DEPTH, find_references
-from repomind.errors import RepoMindError
+from repomind.errors import RepoMindError, WorkspaceLockedError
 from repomind.index.pipeline import IndexProgress, index_repository
+from repomind.ingest.git import commits_behind, current_sha
 from repomind.model import ScipStatus, Tier
 from repomind.store.sqlite.graph import SqliteGraphStore
-from repomind.workspace import index_db_path, normalize_repo_path
+from repomind.workspace import (
+    index_db_path,
+    list_registered_repos,
+    normalize_repo_path,
+    remove_repo_workspace,
+    workspace_dir_size,
+)
 
 app = typer.Typer(
     name="repomind",
@@ -209,6 +214,177 @@ def refs(
                 )
     finally:
         store.close()
+
+
+def _format_size(n: int) -> str:
+    size = float(n)
+    for unit in ("B", "KB", "MB"):
+        if size < 1024:
+            return f"{int(size)} {unit}" if unit == "B" else f"{size:.1f} {unit}"
+        size /= 1024
+    return f"{size:.1f} GB"
+
+
+@app.command(name="list")
+def list_repos() -> None:
+    """List every indexed repository: path, SHA, SCIP status, size on disk
+    (F-15 requirement 1), plus a total across all of them (requirement 5).
+    A registry entry whose source repository has moved or been deleted is
+    reported as such rather than raised as an error (requirement 4).
+    """
+    entries = list_registered_repos()
+    if not entries:
+        console.print("[dim]no repositories indexed yet. Run `repomind index .` in one.[/dim]")
+        return
+
+    total_bytes = 0
+    for entry in entries:
+        size_bytes = workspace_dir_size(entry.root_path)
+        total_bytes += size_bytes
+
+        db_path = index_db_path(entry.root_path)
+        if db_path.exists():
+            store = SqliteGraphStore(db_path)
+            try:
+                listing = repo_listing(
+                    store, entry.root_path, exists=entry.exists, size_bytes=size_bytes
+                )
+            finally:
+                store.close()
+        else:
+            # Registered but nothing on disk -- e.g. the workspace directory
+            # was removed by hand rather than through `repomind remove`.
+            listing = RepoListing(
+                root_path=entry.root_path,
+                exists=entry.exists,
+                indexed_sha=None,
+                indexed_at=None,
+                scip_status=None,
+                size_bytes=0,
+            )
+
+        stale = "" if listing.exists else "  [yellow](repository not found on disk)[/yellow]"
+        console.print(f"[bold]{listing.root_path}[/bold]{stale}")
+        sha_display = listing.indexed_sha[:12] if listing.indexed_sha else "[dim]none[/dim]"
+        scip_display = listing.scip_status.value if listing.scip_status else "[dim]n/a[/dim]"
+        console.print(
+            f"  SHA: {sha_display}  indexed: {listing.indexed_at or '[dim]never[/dim]'}  "
+            f"scip: {scip_display}  size: {_format_size(size_bytes)}"
+        )
+
+    repo_word = "repository" if len(entries) == 1 else "repositories"
+    console.print(f"\n{len(entries)} {repo_word}, {_format_size(total_bytes)} total")
+
+
+@app.command()
+def status(
+    path: Path = typer.Argument(
+        Path(), help="Repository to report on. Defaults to the current directory."
+    ),
+) -> None:
+    """Report SHA drift, SCIP status, and per-tier symbol/edge counts for
+    one repository's index (F-15 requirement 2).
+    """
+    root = path.resolve()
+    root_path_str = normalize_repo_path(root)
+    db_path = index_db_path(root_path_str)
+    if not db_path.exists():
+        console.print(f"[red]error:[/red] {root} has not been indexed yet. Run `repomind index .`")
+        raise typer.Exit(code=1)
+
+    store = SqliteGraphStore(db_path)
+    try:
+        repo = store.get_repo_by_path(root_path_str)
+        if repo is None or repo.id is None:
+            console.print(
+                f"[red]error:[/red] {root} has not been indexed yet. Run `repomind index .`"
+            )
+            raise typer.Exit(code=1)
+
+        current = current_sha(root)
+        behind = (
+            commits_behind(root, repo.indexed_sha, current)
+            if repo.indexed_sha is not None and current is not None
+            else None
+        )
+        report = repo_status(
+            store,
+            repo.id,
+            root_path_str,
+            current_sha=current,
+            commits_behind=behind,
+            size_bytes=workspace_dir_size(root_path_str),
+        )
+        assert report is not None  # repo.id was just read from this same store
+
+        console.print(f"[bold]{root}[/bold]")
+        if report.indexed_sha is None:
+            console.print("  SHA:      [dim]none (not a git repo)[/dim]")
+        elif report.current_sha is None:
+            console.print(
+                f"  SHA:      {report.indexed_sha}  [dim](working copy: not a git repo)[/dim]"
+            )
+        elif report.indexed_sha == report.current_sha:
+            console.print(f"  SHA:      {report.indexed_sha}  [green](up to date)[/green]")
+        elif report.commits_behind is not None:
+            console.print(
+                f"  SHA:      {report.indexed_sha}  [yellow]({report.commits_behind} "
+                f"commit(s) behind {report.current_sha})[/yellow]"
+            )
+        else:
+            console.print(
+                f"  SHA:      {report.indexed_sha}  [yellow](drifted from "
+                f"{report.current_sha}, exact count unknown -- history rewritten?)[/yellow]"
+            )
+
+        scip_display = report.scip_status.value if report.scip_status else "[dim]n/a[/dim]"
+        console.print(f"  scip:     {scip_display}")
+        console.print(
+            "  symbols:  " + ", ".join(f"{k}={v}" for k, v in report.symbol_counts.items() if v)
+        )
+        console.print("  edges:    " + ", ".join(f"{k}={v}" for k, v in report.edge_counts.items()))
+        if report.last_run_status is not None:
+            duration = (
+                f"{report.last_run_duration_seconds:.2f}s"
+                if report.last_run_duration_seconds is not None
+                else "[dim]unknown[/dim]"
+            )
+            console.print(f"  last run: {report.last_run_status.value}, {duration}")
+        console.print(f"  size:     {_format_size(report.size_bytes)}")
+
+        # F-2 requirement 6 / design.md's own failure table: stated again
+        # here, not just at index time -- a degraded run is easy to miss
+        # in a summary from a `repomind index` invocation that already
+        # scrolled off screen by the time someone checks `refs --tier
+        # resolved` and wonders why it is empty.
+        if report.scip_status == ScipStatus.DEGRADED:
+            console.print(
+                "  [yellow]warning:[/yellow] resolved-tier edges are empty -- SCIP was "
+                "unavailable on the last index run."
+            )
+    finally:
+        store.close()
+
+
+@app.command()
+def remove(
+    path: Path = typer.Argument(..., help="Repository whose index should be deleted."),
+) -> None:
+    """Delete a repository's index (F-15 requirement 3). Never touches the
+    repository itself -- only this tool's own copy under ``~/.repomind``.
+    """
+    root = path.resolve()
+    root_path_str = normalize_repo_path(root)
+    try:
+        removed = remove_repo_workspace(root_path_str)
+    except WorkspaceLockedError as exc:
+        console.print(f"[red]error:[/red] {exc}")
+        raise typer.Exit(code=1) from exc
+
+    if removed:
+        console.print(f"[green]done.[/green] removed index for {root}")
+    else:
+        console.print(f"[dim]nothing to remove for {root} (no index found).[/dim]")
 
 
 if __name__ == "__main__":
