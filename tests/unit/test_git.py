@@ -52,6 +52,26 @@ def test_changed_paths_since_reports_only_the_diff(tmp_path: Path) -> None:
     assert changed_paths_since(tmp_path, first.hexsha) == {"a.py"}
 
 
+def test_changed_paths_since_is_none_for_a_non_git_directory(tmp_path: Path) -> None:
+    assert changed_paths_since(tmp_path, "deadbeef") is None
+
+
+def test_changed_paths_since_is_none_when_the_indexed_sha_no_longer_exists(
+    tmp_path: Path,
+) -> None:
+    from git import Repo as GitRepo
+
+    repo = GitRepo.init(tmp_path)
+    (tmp_path / "a.py").write_text("x = 1", encoding="utf-8")
+    repo.index.add(["a.py"])
+    repo.index.commit("only commit")
+
+    # Same "history rewritten since this index was built" case
+    # commits_behind must not crash on -- RM-034 falls back to a full
+    # index rather than raising.
+    assert changed_paths_since(tmp_path, "0" * 40) is None
+
+
 def test_commits_behind_counts_commits_made_since_indexing(tmp_path: Path) -> None:
     from git import Repo as GitRepo
 

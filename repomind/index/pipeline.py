@@ -2,7 +2,8 @@
 embed -> persist.
 
 RM-018 (symbols) + RM-020/RM-021 (heuristic edges) + RM-022 (resolved
-edges via SCIP) + RM-030/031/032 (chunks, embeddings, persistence).
+edges via SCIP) + RM-030/031/032 (chunks, embeddings, persistence) +
+RM-034 (incremental scope: ``_incremental_scope``).
 
 Edge computation happens in three passes, for the reason design.md's own
 flow diagram separates them:
@@ -40,16 +41,26 @@ propagates to this function's own top-level exception handler like any
 other genuine failure, marking the run interrupted.
 
 Resumability, stated precisely (F-1 requirement 9: "a re-run resumes
-rather than restarting"): this pipeline's notion of resumability is
-*safe to re-run*, not *skip already-completed files*. Every per-file write
-(``replace_symbols``, ``replace_chunks``) is idempotent, so interrupting a
-run and calling ``index_repository`` again produces a correct, complete
-index with no duplicate or orphaned rows -- it does not yet skip files a
-previous partial run already finished. Genuine skip-unchanged-files
-resumption falls out of RM-034's incremental-invalidation machinery (M3,
-blob_sha comparison), which will make a restart fast as well as safe;
-building a separate, throwaway checkpoint-resume scheme now that RM-034
-will likely reshape would be premature.
+rather than restarting"): every per-file write (``replace_symbols``,
+``replace_chunks``) is idempotent, so interrupting a run and calling
+``index_repository`` again always produces a correct, complete index
+with no duplicate or orphaned rows -- *safe to re-run* holds
+unconditionally, for both a full index and an incremental one (F-3,
+RM-034).
+
+An interrupted incremental run's retry is *not* a smaller, "only what's
+left" diff: ``set_repo_indexed_sha`` (``_run``) only runs on full
+success, so a retry's ``from_sha`` is unchanged and
+``_incremental_scope`` sees the exact same diff, reprocessing every file
+in it from scratch regardless of how far the failed attempt got.
+Deliberately -- whole-repo edge resolution runs once, *after* every
+scoped file has been re-parsed (this docstring's opening section), so a
+file whose symbols an interrupted run already persisted but whose edges
+it never reached would silently keep stale or missing edges forever if
+a retry treated it as already done. Redoing the whole diff is the price
+of that correctness; it is still bounded by the diff's size, not the
+repo's, and it matches how a full index already behaved before RM-034
+(safe, not minimal, on every retry).
 """
 
 from __future__ import annotations
@@ -71,7 +82,7 @@ from repomind.index.resolve import (
     resolve_scip_edges,
 )
 from repomind.ingest.discover import discover_files
-from repomind.ingest.git import current_sha
+from repomind.ingest.git import changed_paths_since, current_sha
 from repomind.languages import get_language_pack_for_extension
 
 # Deliberately Python-specific, not dispatched through LanguagePack: RM-022
@@ -93,6 +104,7 @@ from repomind.workspace import (
 if TYPE_CHECKING:
     from collections.abc import Callable, Sequence
 
+    from repomind.ingest.discover import DiscoveredFile
     from repomind.languages.base import LanguagePack
     from repomind.model import IndexRun, ParsedReference
 
@@ -183,11 +195,22 @@ def _run(
     repo = store.upsert_repo(Repo(root_path=root_path_str))
     assert repo.id is not None  # upsert_repo always assigns one
 
-    previous_run = store.get_latest_index_run(repo.id)
-    from_sha = previous_run.to_sha if previous_run else None
+    # The SHA of the last run that actually finished OK:
+    # set_repo_indexed_sha runs only on success, and upsert_repo above
+    # preserves the stored value rather than clearing it (see its own
+    # docstring -- that is load-bearing here, not incidental).
+    # Deliberately not get_latest_index_run().to_sha, which is the SHA a
+    # run was *aiming* at: for an interrupted run that is usually current
+    # HEAD already, so diffing against it would report no changes at all
+    # and skip every file that run never got to.
+    from_sha = repo.indexed_sha
     to_sha = current_sha(root)
 
     discovered = list(discover_files(root))
+    paths_to_process = _incremental_scope(store, repo.id, root, discovered, from_sha, to_sha)
+    if paths_to_process is not None:
+        discovered = [d for d in discovered if d.rel_path in paths_to_process]
+
     run = store.start_index_run(repo.id, from_sha, to_sha, files_total=len(discovered))
     assert run.id is not None  # start_index_run always assigns one
 
@@ -280,6 +303,127 @@ def _run(
         chunk_count=store.count_chunks(repo_id),
         elapsed_seconds=0.0,  # filled in by index_repository, once total is known
     )
+
+
+def _incremental_scope(
+    store: SqliteGraphStore,
+    repo_id: int,
+    root: Path,
+    discovered: Sequence[DiscoveredFile],
+    from_sha: str | None,
+    to_sha: str | None,
+) -> set[str] | None:
+    """F-3: which repo-relative paths actually need reprocessing this
+    run. ``None`` means "everything" (a full index) -- no previous SHA to
+    diff against, not a git repo, or ``from_sha`` no longer reachable
+    (history rewrite since that index was built); F-3 requirement 7's
+    graceful degradation applies to all three the same way.
+
+    Scope is git-diff-derived (F-3 requirement 1), not a walk of every
+    *stored* file: ``store.list_files`` is capped and, per its own caller
+    elsewhere in this module, not safe to rely on for "every file" in a
+    large repo, while ``changed_paths_since`` costs proportional to the
+    diff, not the repo. It is also already content-hash based under the
+    hood (git's own blob hashing), which is what satisfies F-3
+    requirement 2 -- "a touched-but-unmodified file is skipped" -- for
+    free: a file whose bytes are identical between ``from_sha`` and
+    ``to_sha`` never appears in the diff at all. A *second*,
+    ``File.blob_sha``-based check on top of that was tried and dropped: it
+    made an interrupted-then-retried run silently stop recomputing a
+    reprocessed file's edges (its ``blob_sha`` already matches on retry,
+    so it looks "unchanged" even though the run that touched it never
+    reached edge resolution) -- worse than the redundancy it was meant to
+    catch. See this module's own "Resumability" paragraph.
+
+    Two things happen here, once per changed git path: a path no longer
+    discoverable (deleted, or newly excluded by a filter) has whatever we
+    stored for it removed outright (F-3 requirement 3, via cascade);
+    everything else is reprocessed, pulling in its graph neighbours
+    (:func:`_find_neighbour_file_ids`) so their invalidated edges get
+    recomputed too.
+
+    Known limitation, narrower than the retry issue above and not fixed
+    by it: neighbour detection reads *current* edges, and reprocessing a
+    changed file (``replace_symbols``, inside the same run) cascade-deletes
+    its old symbol rows -- and with them, any edge a not-yet-reprocessed
+    neighbour had pointing at one -- immediately, not at the end of the
+    run. A crash landing between "changed file reprocessed" and "its
+    neighbour reprocessed" can therefore lose that neighbour's edge
+    silently, and a retry has no record of the original neighbour set to
+    recover it from (only whatever edges still happen to exist). This is
+    accepted, not fixed, for now: the same class of incompleteness the
+    heuristic tier already carries (resolve.py's own docstring -- a
+    missed edge, not a wrong one), bounded to a narrow crash-timing
+    window, and self-healing the next time that neighbour file changes
+    for any reason. Closing it fully means persisting the computed scope
+    somewhere that survives a crash, which is real future work, not a
+    fit for this ticket's time-box.
+    """
+    if from_sha is None or to_sha is None:
+        return None
+    changed = changed_paths_since(root, from_sha, to_sha)
+    if changed is None:
+        return None
+
+    discovered_paths = {d.rel_path for d in discovered}
+    changed_file_ids: set[int] = set()
+    changed_paths: set[str] = set()
+
+    for path in changed:
+        existing = store.get_file_by_path(repo_id, path)
+        if path not in discovered_paths:
+            # Gone, or newly excluded by a discovery filter -- either way
+            # nothing to reprocess, only to remove (F-3 requirement 3).
+            if existing is not None and existing.id is not None:
+                store.delete_file(existing.id)
+            continue
+
+        if existing is not None and existing.id is not None:
+            changed_file_ids.add(existing.id)
+        changed_paths.add(path)
+
+    neighbour_paths = {
+        file.path
+        for file_id in _find_neighbour_file_ids(store, repo_id, changed_file_ids)
+        if (file := store.get_file(file_id)) is not None
+    }
+    return changed_paths | neighbour_paths
+
+
+def _find_neighbour_file_ids(
+    store: SqliteGraphStore, repo_id: int, changed_file_ids: set[int]
+) -> set[int]:
+    """Files with an edge pointing *into* a symbol one of
+    ``changed_file_ids`` defines. Reprocessing only the changed files
+    would silently lose these: ``replace_symbols`` deletes and reinserts
+    every symbol row for a changed file, and ``ON DELETE CASCADE`` takes
+    any edge whose ``dst_symbol_id`` pointed at the old row down with it.
+    Those source files need their references re-resolved too (F-3's own
+    "technical implications" note on why neighbour recomputation is
+    required) even though their own content never changed -- the same
+    reason they end up back in this run's ``discovered`` list, processed
+    exactly like a genuinely changed file.
+
+    ``edges_to`` is capped like every other query here (store/base.py:
+    nothing returns an unbounded result set), so a symbol with more
+    incoming edges than that cap contributes only the first page of
+    neighbours. Same class of miss as the crash window
+    :func:`_incremental_scope` documents, and it needs the same fix --
+    a symbol that popular is rare enough not to justify an unbounded
+    query on this path today.
+    """
+    neighbours: set[int] = set()
+    for file_id in changed_file_ids:
+        for symbol in store.list_symbols(repo_id, file_id=file_id):
+            if symbol.id is None:
+                continue
+            for edge in store.edges_to(symbol.id):
+                if (
+                    edge.evidence_file_id is not None
+                    and edge.evidence_file_id not in changed_file_ids
+                ):
+                    neighbours.add(edge.evidence_file_id)
+    return neighbours
 
 
 def _embed_chunks(store: SqliteGraphStore, chunks: list[Chunk]) -> None:

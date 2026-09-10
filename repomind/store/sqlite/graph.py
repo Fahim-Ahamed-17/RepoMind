@@ -122,17 +122,35 @@ class SqliteGraphStore:
     # -- repo ----------------------------------------------------------
 
     def upsert_repo(self, repo: Repo) -> Repo:
+        """Ensures a row for ``repo.root_path`` exists, creating one on
+        first call. On conflict, only the fields ``repo`` actually
+        supplies (non-``None``) are updated -- ``COALESCE`` against the
+        existing row, not a blind overwrite. index/pipeline.py's own
+        ``_run`` calls this every single run with a bare
+        ``Repo(root_path=...)`` just to fetch the row's id, then reads
+        ``indexed_sha`` to pick the incremental diff base (RM-034). A
+        blind overwrite would clear that on every call and restore it
+        only if *that* run reached :meth:`set_repo_indexed_sha` -- so one
+        interrupted run would silently downgrade the next to a full
+        re-index. tests/unit/test_store_sqlite.py's
+        ``test_upsert_repo_does_not_wipe_fields_it_was_not_given`` covers
+        it, and fails against the previous blind-overwrite version.
+
+        Returns the row as persisted, not the argument echoed back: after
+        a ``COALESCE`` the two genuinely differ, and handing a caller
+        fields that do not match what is stored is the same class of trap.
+        """
         with self._conn:
             cur = self._conn.execute(
                 """
                 INSERT INTO repo (root_path, remote_url, indexed_sha, indexed_at, scip_status)
                 VALUES (:root_path, :remote_url, :indexed_sha, :indexed_at, :scip_status)
                 ON CONFLICT(root_path) DO UPDATE SET
-                    remote_url = excluded.remote_url,
-                    indexed_sha = excluded.indexed_sha,
-                    indexed_at = excluded.indexed_at,
-                    scip_status = excluded.scip_status
-                RETURNING id
+                    remote_url = COALESCE(excluded.remote_url, repo.remote_url),
+                    indexed_sha = COALESCE(excluded.indexed_sha, repo.indexed_sha),
+                    indexed_at = COALESCE(excluded.indexed_at, repo.indexed_at),
+                    scip_status = COALESCE(excluded.scip_status, repo.scip_status)
+                RETURNING *
                 """,
                 {
                     "root_path": repo.root_path,
@@ -142,15 +160,8 @@ class SqliteGraphStore:
                     "scip_status": repo.scip_status.value if repo.scip_status else None,
                 },
             )
-            (new_id,) = cur.fetchone()
-        return Repo(
-            id=new_id,
-            root_path=repo.root_path,
-            remote_url=repo.remote_url,
-            indexed_sha=repo.indexed_sha,
-            indexed_at=repo.indexed_at,
-            scip_status=repo.scip_status,
-        )
+            row = cur.fetchone()
+        return _row_to_repo(row)
 
     def get_repo(self, repo_id: int) -> Repo | None:
         row = self._conn.execute("SELECT * FROM repo WHERE id = ?", (repo_id,)).fetchone()

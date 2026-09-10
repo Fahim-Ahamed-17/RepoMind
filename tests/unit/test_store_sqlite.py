@@ -10,6 +10,7 @@ from repomind.model import (
     File,
     IndexRunStatus,
     Repo,
+    ScipStatus,
     Symbol,
     SymbolKind,
     Tier,
@@ -36,6 +37,26 @@ def test_upsert_repo_is_keyed_by_root_path(store: SqliteGraphStore) -> None:
     second = store.upsert_repo(Repo(root_path="/proj", indexed_sha="abc"))
     assert first.id == second.id
     assert store.get_repo(first.id).indexed_sha == "abc"  # type: ignore[union-attr]
+
+
+def test_upsert_repo_does_not_wipe_fields_it_was_not_given(store: SqliteGraphStore) -> None:
+    """RM-034 depends on this: ``index/pipeline.py``'s ``_run`` calls
+    ``upsert_repo(Repo(root_path=...))`` at the start of every run purely
+    to get the row's id, and reads ``indexed_sha`` (the last run that
+    finished OK) to decide the incremental diff base. A blind overwrite
+    would clear that on every call and only restore it if *that* run
+    succeeded -- so one interrupted run would silently downgrade the next
+    one to a full re-index.
+    """
+    created = store.upsert_repo(Repo(root_path="/proj"))
+    assert created.id is not None
+    store.set_repo_indexed_sha(created.id, "abc", ScipStatus.OK)
+
+    returned = store.upsert_repo(Repo(root_path="/proj"))
+
+    assert returned.indexed_sha == "abc"  # the returned object, not just the row
+    assert returned.scip_status == ScipStatus.OK
+    assert store.get_repo(created.id).indexed_sha == "abc"  # type: ignore[union-attr]
 
 
 def test_upsert_file_is_keyed_by_repo_and_path(store: SqliteGraphStore, repo_id: int) -> None:
