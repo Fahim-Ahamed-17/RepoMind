@@ -22,7 +22,7 @@ from repomind.errors import ScipUnavailableError
 from repomind.index import pipeline as pipeline_module
 from repomind.index.pipeline import index_repository
 from repomind.languages.python.scip import ScipIndex, is_available
-from repomind.model import ScipStatus, Tier
+from repomind.model import EdgeKind, ScipStatus, Tier
 from repomind.store.sqlite.graph import SqliteGraphStore
 from repomind.workspace import index_db_path, normalize_repo_path
 
@@ -129,6 +129,57 @@ def test_real_scip_python_resolves_the_known_relationships_in_the_simple_fixture
         assert qname("script.main") in resolved_sources("pkg.module_b.build_default")
         # The `if __name__ == "__main__": main()` call at module scope.
         assert qname("script") in resolved_sources("script.main")
+    finally:
+        store.close()
+
+
+@pytest.mark.scip
+@pytest.mark.skipif(not is_available(), reason="scip-python not on PATH")
+def test_resolved_and_heuristic_tiers_coexist_for_the_same_relationship(
+    isolated_workspace: Path, simple_fixture_repo: Path
+) -> None:
+    """F-2 requirement 1/4 (features.md): tiers are never merged, not even
+    when both a heuristic and a resolved edge exist for the literal same
+    ``(src, dst, kind)`` -- confirmed here with real data rather than only
+    the schema-level UNIQUE(src, dst, kind, tier) constraint that makes it
+    *possible*: ``pkg.module_b.build_default``'s ``-> Widget`` return
+    annotation is exactly such a case -- the heuristic resolver's own
+    annotation-matching rule (index/resolve.py) and SCIP both independently
+    find it, and both rows must survive, queryable separately.
+    """
+    result = index_repository(simple_fixture_repo)
+    assert result.repo.scip_status == ScipStatus.OK
+
+    root_path = normalize_repo_path(simple_fixture_repo)
+    store = SqliteGraphStore(index_db_path(root_path))
+    try:
+        repo = store.get_repo_by_path(root_path)
+        assert repo is not None and repo.id is not None
+
+        widget = store.find_symbol_by_qualified_name(repo.id, "pkg.module_a.Widget")
+        assert widget is not None and widget.id is not None
+        build_default = store.find_symbol_by_qualified_name(repo.id, "pkg.module_b.build_default")
+        assert build_default is not None and build_default.id is not None
+
+        heuristic_edges = store.edges_to(
+            widget.id, kind=EdgeKind.REFERENCES, tiers=(Tier.HEURISTIC,)
+        )
+        resolved_edges = store.edges_to(widget.id, kind=EdgeKind.REFERENCES, tiers=(Tier.RESOLVED,))
+        # Not asserted as the *only* heuristic hit: pkg.module_a.make_widget
+        # has its own `-> Widget` return annotation in the same file, a
+        # second, separate real reference this test does not need to care
+        # about -- only that build_default's own edge is present, in both
+        # tiers, without one displacing the other.
+        assert build_default.id in {e.src_symbol_id for e in heuristic_edges}
+        assert {e.src_symbol_id for e in resolved_edges} == {build_default.id}
+
+        # Both tiers together for build_default specifically: two distinct
+        # rows, not one collapsed row -- the "never merged" invariant
+        # holding under an unfiltered query, not just a tier-scoped one.
+        both = store.edges_from(build_default.id, kind=EdgeKind.REFERENCES)
+        both_to_widget = [e for e in both if e.dst_symbol_id == widget.id]
+        assert len(both_to_widget) == 2
+        assert {e.tier for e in both_to_widget} == {Tier.HEURISTIC, Tier.RESOLVED}
     finally:
         store.close()
 
