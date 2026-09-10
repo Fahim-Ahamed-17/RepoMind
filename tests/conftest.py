@@ -7,8 +7,44 @@ isolated from the real ``~/.repomind`` -- see :func:`isolated_workspace`.
 from __future__ import annotations
 
 from pathlib import Path
+from typing import TYPE_CHECKING
 
 import pytest
+
+if TYPE_CHECKING:
+    from collections.abc import Sequence
+
+
+@pytest.fixture(autouse=True)
+def fake_embedder(request: pytest.FixtureRequest, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Real embedding needs ``bge-small-en-v1.5`` loaded from disk --
+    slow, and on a machine where it is not already cached, a genuine
+    network fetch that ``--disable-socket`` (docs/conventions.md: "No
+    network in any test") would correctly block. Every test that runs the
+    full ``index_repository()`` pipeline would otherwise pay that cost, or
+    fail outright on a cold cache, just to get chunks stored -- none of
+    them care which vectors land in ``chunk_vec``.
+
+    So fake ``LocalEmbedder`` here, at the exact seam ``index/pipeline.py``
+    imports it through, the same technique
+    tests/integration/test_scip_pipeline.py uses for ``run_scip_python``,
+    and reserve the real model for the one test that actually needs it:
+    test_embed.py's ``embedding_model``-marked test, which talks to
+    ``LocalEmbedder`` directly rather than through the pipeline and so is
+    exempted below.
+    """
+    if "embedding_model" in request.keywords:
+        return
+
+    from repomind.embed.local import DIMENSIONS
+
+    class _FakeEmbedder:
+        dimensions = DIMENSIONS
+
+        def embed(self, texts: Sequence[str]) -> list[list[float]]:
+            return [[0.0] * DIMENSIONS for _ in texts]
+
+    monkeypatch.setattr("repomind.index.pipeline.LocalEmbedder", _FakeEmbedder)
 
 
 @pytest.fixture

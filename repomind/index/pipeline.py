@@ -1,7 +1,8 @@
-"""Index pipeline orchestration: discover -> parse -> resolve -> persist.
+"""Index pipeline orchestration: discover -> parse -> resolve -> chunk ->
+embed -> persist.
 
 RM-018 (symbols) + RM-020/RM-021 (heuristic edges) + RM-022 (resolved
-edges via SCIP). No chunks or embeddings yet (RM-030 onward, M3).
+edges via SCIP) + RM-030/031/032 (chunks, embeddings, persistence).
 
 Edge computation happens in three passes, for the reason design.md's own
 flow diagram separates them:
@@ -25,17 +26,30 @@ flow diagram separates them:
     failing the run: the heuristic edges already persisted stand
     regardless.
 
+Chunking and embedding follow a similar per-file/whole-repo split, for a
+different reason than edge resolution: chunking needs nothing beyond one
+file's own already-parsed symbols (design.md section 10), so it happens
+per file, right alongside ``replace_symbols`` (``_index_one_file``);
+embedding is deferred to one call over every chunk in the whole repo
+(``_run``), so :class:`~repomind.embed.base.Embedder` implementations get
+to batch internally (design.md: "batches at 32 chunks") rather than
+this module re-deriving that batching itself. Unlike a SCIP failure, an
+embedding failure is never caught here -- design.md's own failure table:
+"indexing without embeddings is not a useful partial state" -- so it
+propagates to this function's own top-level exception handler like any
+other genuine failure, marking the run interrupted.
+
 Resumability, stated precisely (F-1 requirement 9: "a re-run resumes
 rather than restarting"): this pipeline's notion of resumability is
 *safe to re-run*, not *skip already-completed files*. Every per-file write
-(``replace_symbols``) is idempotent, so interrupting a run and calling
-``index_repository`` again produces a correct, complete index with no
-duplicate or orphaned rows -- it does not yet skip files a previous partial
-run already finished. Genuine skip-unchanged-files resumption falls out of
-RM-034's incremental-invalidation machinery (M3, blob_sha comparison),
-which will make a restart fast as well as safe; building a separate,
-throwaway checkpoint-resume scheme now that RM-034 will likely reshape
-would be premature.
+(``replace_symbols``, ``replace_chunks``) is idempotent, so interrupting a
+run and calling ``index_repository`` again produces a correct, complete
+index with no duplicate or orphaned rows -- it does not yet skip files a
+previous partial run already finished. Genuine skip-unchanged-files
+resumption falls out of RM-034's incremental-invalidation machinery (M3,
+blob_sha comparison), which will make a restart fast as well as safe;
+building a separate, throwaway checkpoint-resume scheme now that RM-034
+will likely reshape would be premature.
 """
 
 from __future__ import annotations
@@ -48,7 +62,9 @@ from typing import TYPE_CHECKING
 
 import structlog
 
+from repomind.embed.local import LocalEmbedder
 from repomind.errors import IndexingError, ScipUnavailableError
+from repomind.index.chunker import chunk_file
 from repomind.index.resolve import (
     defines_edges_for_file,
     resolve_heuristic_edges,
@@ -64,7 +80,7 @@ from repomind.languages import get_language_pack_for_extension
 # is where a per-language dispatch seam would be introduced, not invented
 # speculatively now for one caller.
 from repomind.languages.python.scip import run_scip_python
-from repomind.model import File, IndexRunStatus, Repo, ScipStatus, Symbol
+from repomind.model import Chunk, File, IndexRunStatus, Repo, ScipStatus, Symbol
 from repomind.store.sqlite.graph import SqliteGraphStore
 from repomind.workspace import (
     index_db_path,
@@ -112,6 +128,11 @@ class IndexResult:
     design.md section 4.3 -- never merged. ``resolved`` is 0 whenever SCIP
     was skipped (``--no-scip``) or degraded; ``heuristic`` reflects real
     ``defines`` and resolved-reference edges regardless (RM-020/RM-021)."""
+    chunk_count: int
+    """Retrieval units persisted (RM-030/032), all embedded by the time
+    this result is returned -- an embedding failure fails the whole run
+    (this module's own docstring), so there is no "chunked but not yet
+    embedded" state for a caller to observe here."""
     elapsed_seconds: float
 
 
@@ -183,6 +204,10 @@ def _run(
     # rather than a second pass over store.list_files, which is capped at
     # DEFAULT_LIST_LIMIT and so is not safe to rely on for "every file".
     file_id_to_rel_path: dict[int, str] = {}
+    # Every chunk persisted this run, across every file -- embedded in one
+    # batch after the loop rather than per file, so the Embedder gets to
+    # batch internally (this module's own docstring).
+    all_chunks: list[Chunk] = []
     try:
         for i, disc in enumerate(discovered, start=1):
             pack = get_language_pack_for_extension(disc.abs_path.suffix)
@@ -196,11 +221,12 @@ def _run(
                     files_skipped += 1
                 else:
                     blob_sha = hashlib.sha256(raw).hexdigest()
-                    file_id, references = _index_one_file(
+                    file_id, references, chunks = _index_one_file(
                         store, repo.id, disc.rel_path, text, blob_sha, pack
                     )
                     file_references.append((file_id, references))
                     file_id_to_rel_path[file_id] = disc.rel_path
+                    all_chunks.extend(chunks)
                     files_indexed += 1
 
             store.update_index_run_progress(run.id, i)
@@ -230,6 +256,8 @@ def _run(
             use_scip=use_scip,
         )
 
+        _embed_chunks(store, all_chunks)
+
         store.set_repo_indexed_sha(repo.id, to_sha, scip_status)
         store.finish_index_run(run.id, IndexRunStatus.OK)
     except Exception as exc:
@@ -249,8 +277,31 @@ def _run(
         files_skipped=files_skipped,
         symbol_counts=store.count_symbols_by_kind(repo_id),
         edge_counts=store.count_edges_by_tier(repo_id),
+        chunk_count=store.count_chunks(repo_id),
         elapsed_seconds=0.0,  # filled in by index_repository, once total is known
     )
+
+
+def _embed_chunks(store: SqliteGraphStore, chunks: list[Chunk]) -> None:
+    """RM-031/032: embed every chunk from this run in one batch and
+    persist the vectors. Deliberately raises straight through to
+    ``_run``'s own top-level exception handler on any failure -- unlike
+    ``_run_scip``, there is no degraded status to record here (design.md's
+    failure table: "indexing without embeddings is not a useful partial
+    state").
+
+    ``LocalEmbedder()`` is constructed here, not once per
+    ``index_repository`` call higher up, so a run with zero chunks (an
+    empty repo, or one with only unsupported files) never even imports
+    ``fastembed`` -- consistent with :class:`~repomind.embed.local.LocalEmbedder`
+    itself only loading the actual model lazily, on first real use.
+    """
+    if not chunks:
+        return
+    embedder = LocalEmbedder()
+    vectors = embedder.embed([c.text for c in chunks])
+    embeddings = {c.id: v for c, v in zip(chunks, vectors, strict=True) if c.id is not None}
+    store.set_chunk_embeddings(embeddings)
 
 
 def _run_scip(
@@ -330,10 +381,11 @@ def _index_one_file(
     text: str,
     blob_sha: str,
     pack: LanguagePack,
-) -> tuple[int, list[ParsedReference]]:
-    """Parse, persist this file's symbols and ``defines`` edges, and return
-    ``(file_id, references)`` for the caller's deferred whole-repo
-    resolution pass (see this module's docstring).
+) -> tuple[int, list[ParsedReference], Sequence[Chunk]]:
+    """Parse, persist this file's symbols, ``defines`` edges, and chunks,
+    and return ``(file_id, references, chunks)`` for the caller's deferred
+    whole-repo resolution and embedding passes (see this module's
+    docstring).
     """
     # Path(...), not PurePosixPath: pathlib.Path accepts "/" as a separator
     # on every platform including Windows, and parse_python_file normalises
@@ -381,4 +433,23 @@ def _index_one_file(
     defines = defines_edges_for_file(repo_id, file_row.id, parsed.symbols, persisted)
     store.insert_edges(defines)
 
-    return file_row.id, parsed.references
+    qname_to_symbol_id = {s.qualified_name: s.id for s in persisted}
+    chunks = [
+        Chunk(
+            repo_id=repo_id,
+            file_id=file_row.id,
+            symbol_id=(
+                qname_to_symbol_id.get(pc.symbol_qualified_name)
+                if pc.symbol_qualified_name is not None
+                else None
+            ),
+            start_line=pc.start_line,
+            end_line=pc.end_line,
+            text=pc.text,
+            n_tokens=pc.n_tokens,
+        )
+        for pc in chunk_file(parsed, text)
+    ]
+    persisted_chunks = store.replace_chunks(file_row.id, chunks)
+
+    return file_row.id, parsed.references, persisted_chunks

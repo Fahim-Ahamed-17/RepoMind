@@ -2,23 +2,33 @@
 ``status`` (F-15).
 
 Same shape as ``reverse.py``: a thin, storage-agnostic layer over an
-already-open :class:`~repomind.store.base.GraphStore` plus whatever
-filesystem and git facts the caller (``cli/main.py``) has already
-gathered (``workspace.list_registered_repos``, ``workspace.
-workspace_dir_size``, ``ingest.git.commits_behind``) -- this module never
-opens a store connection or touches the filesystem itself, and requires
-no LLM.
+already-open store plus whatever filesystem and git facts the caller
+(``cli/main.py``) has already gathered (``workspace.list_registered_repos``,
+``workspace.workspace_dir_size``, ``ingest.git.commits_behind``) -- this
+module never opens a store connection or touches the filesystem itself,
+and requires no LLM.
+
+``repo_status`` (RM-032) needs both :class:`~repomind.store.base.GraphStore`
+(symbol/edge counts) and :class:`~repomind.store.base.VectorStore` (chunk
+count) from the same object -- ``_Store`` below is that intersection,
+satisfied today by the one concrete class
+(:class:`~repomind.store.sqlite.graph.SqliteGraphStore`) that implements
+both against the same connection, without this module importing that
+concrete class itself.
 """
 
 from __future__ import annotations
 
 from dataclasses import dataclass
 from datetime import datetime
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Protocol
 
 if TYPE_CHECKING:
     from repomind.model import IndexRunStatus, ScipStatus
-    from repomind.store.base import GraphStore
+    from repomind.store.base import GraphStore, VectorStore
+
+    class _Store(GraphStore, VectorStore, Protocol):
+        """Structural intersection, not a real class -- see module docstring."""
 
 
 @dataclass(frozen=True, slots=True)
@@ -71,13 +81,16 @@ class RepoStatusReport:
     scip_status: ScipStatus | None
     symbol_counts: dict[str, int]
     edge_counts: dict[str, int]
+    chunk_count: int
+    """Retrieval units persisted (RM-030/032) -- 0 for an index built
+    before M3 landed, not an error; re-index to populate it."""
     last_run_status: IndexRunStatus | None
     last_run_duration_seconds: float | None
     size_bytes: int
 
 
 def repo_status(
-    store: GraphStore,
+    store: _Store,
     repo_id: int,
     root_path: str,
     *,
@@ -110,6 +123,7 @@ def repo_status(
         scip_status=repo.scip_status,
         symbol_counts=store.count_symbols_by_kind(repo_id),
         edge_counts=store.count_edges_by_tier(repo_id),
+        chunk_count=store.count_chunks(repo_id),
         last_run_status=last_run.status if last_run is not None else None,
         last_run_duration_seconds=duration,
         size_bytes=size_bytes,

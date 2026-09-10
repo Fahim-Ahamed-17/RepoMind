@@ -81,6 +81,7 @@ def test_repo_status_reports_counts_and_drift(store: SqliteGraphStore) -> None:
     assert report.scip_status == ScipStatus.DEGRADED
     assert report.symbol_counts  # prefilled with every kind at 0 -- never empty
     assert report.edge_counts
+    assert report.chunk_count == 0  # no chunks persisted in this test's store
     assert report.size_bytes == 2048
     assert report.last_run_status is None  # no index_run row created in this test
     assert report.last_run_duration_seconds is None

@@ -215,6 +215,24 @@ CREATE VIRTUAL TABLE chunk_fts USING fts5(
     text, content=chunk, content_rowid=id, tokenize=unicode61
 );
 
+-- chunk_fts is an external-content table: no rows of its own, kept in
+-- sync by hand via SQLite's own documented trigger pattern. chunk_vec
+-- has the same problem for a different reason: vec0 does not support
+-- FOREIGN KEY, so ON DELETE CASCADE cannot reach it -- chunk_ad deletes
+-- from it explicitly instead (RM-032, confirmed 2026-09-10). Both
+-- file/repo cascades still fire chunk_ad as an ordinary AFTER DELETE.
+CREATE TRIGGER chunk_ai AFTER INSERT ON chunk BEGIN
+    INSERT INTO chunk_fts(rowid, text) VALUES (new.id, new.text);
+END;
+CREATE TRIGGER chunk_ad AFTER DELETE ON chunk BEGIN
+    INSERT INTO chunk_fts(chunk_fts, rowid, text) VALUES ('delete', old.id, old.text);
+    DELETE FROM chunk_vec WHERE chunk_id = old.id;
+END;
+CREATE TRIGGER chunk_au AFTER UPDATE ON chunk BEGIN
+    INSERT INTO chunk_fts(chunk_fts, rowid, text) VALUES ('delete', old.id, old.text);
+    INSERT INTO chunk_fts(rowid, text) VALUES (new.id, new.text);
+END;
+
 CREATE VIRTUAL TABLE chunk_vec USING vec0(
     chunk_id INTEGER PRIMARY KEY,
     embedding FLOAT[384]                  -- bge-small-en-v1.5

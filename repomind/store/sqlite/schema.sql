@@ -76,14 +76,35 @@ CREATE TABLE IF NOT EXISTS chunk (
 );
 CREATE INDEX IF NOT EXISTS idx_chunk_symbol ON chunk(symbol_id);
 
--- FTS5 and sqlite-vec (chunk_vec) are created by store/sqlite/graph.py at
--- connection time, not here: sqlite-vec is a runtime-loaded extension, so its
--- virtual table must be created after the extension is loaded onto the
--- connection, which a static schema file executed by a plain sqlite3
--- connection cannot guarantee. See graph.py _ensure_schema().
+-- sqlite-vec (chunk_vec) is created by store/sqlite/graph.py at connection
+-- time, not here: it is a runtime-loaded extension, so its virtual table
+-- must be created after the extension is loaded onto the connection, which
+-- a static schema file executed by a plain sqlite3 connection cannot
+-- guarantee. See graph.py _ensure_schema().
 CREATE VIRTUAL TABLE IF NOT EXISTS chunk_fts USING fts5(
     text, content=chunk, content_rowid=id, tokenize=unicode61
 );
+
+-- chunk_fts is an external-content table (content=chunk): it has no
+-- rows of its own and must be kept in sync by hand -- SQLite's own
+-- documented pattern for this is exactly these three triggers (RM-032).
+-- chunk_vec has the same problem for a different reason: sqlite-vec's
+-- vec0 module does not support FOREIGN KEY, so ON DELETE CASCADE from
+-- symbol/file/repo cannot reach it at all -- chunk_ad below deletes from
+-- it explicitly instead. Both file/repo cascades still fire chunk_ad as
+-- an ordinary AFTER DELETE on chunk, so a cascaded removal cleans up
+-- chunk_fts and chunk_vec alike -- confirmed directly, not assumed.
+CREATE TRIGGER IF NOT EXISTS chunk_ai AFTER INSERT ON chunk BEGIN
+    INSERT INTO chunk_fts(rowid, text) VALUES (new.id, new.text);
+END;
+CREATE TRIGGER IF NOT EXISTS chunk_ad AFTER DELETE ON chunk BEGIN
+    INSERT INTO chunk_fts(chunk_fts, rowid, text) VALUES ('delete', old.id, old.text);
+    DELETE FROM chunk_vec WHERE chunk_id = old.id;
+END;
+CREATE TRIGGER IF NOT EXISTS chunk_au AFTER UPDATE ON chunk BEGIN
+    INSERT INTO chunk_fts(chunk_fts, rowid, text) VALUES ('delete', old.id, old.text);
+    INSERT INTO chunk_fts(rowid, text) VALUES (new.id, new.text);
+END;
 
 -- Observability and resumability, not decoration (design.md 4.2 comment).
 CREATE TABLE IF NOT EXISTS index_run (

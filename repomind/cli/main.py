@@ -125,6 +125,7 @@ def index(
     )
     edges_summary = ", ".join(f"{k}={v}" for k, v in result.edge_counts.items())
     console.print(f"  edges:    {edges_summary}")
+    console.print(f"  chunks:   {result.chunk_count} (embedded, searchable)")
     console.print(f"  SHA:      {result.repo.indexed_sha or '[dim]none (not a git repo)[/dim]'}")
 
     # "Tell the user" (docs/conventions.md Logging section) -- scip_status
@@ -343,6 +344,7 @@ def status(
             "  symbols:  " + ", ".join(f"{k}={v}" for k, v in report.symbol_counts.items() if v)
         )
         console.print("  edges:    " + ", ".join(f"{k}={v}" for k, v in report.edge_counts.items()))
+        console.print(f"  chunks:   {report.chunk_count}")
         if report.last_run_status is not None:
             duration = (
                 f"{report.last_run_duration_seconds:.2f}s"

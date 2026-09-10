@@ -5,14 +5,17 @@ Structural typing (``Protocol``, not ABC) per docs/conventions.md: adapters
 stay independent of the core, and a second implementation never has to
 inherit from anything here.
 
-Only :class:`GraphStore` is defined in RM-012. ``VectorStore`` lands in
-RM-032 (M3) once hybrid search (F-5, AD-8) makes its required shape
-concrete -- declaring it now would mean guessing method signatures ahead of
-the ticket that actually needs them.
+:class:`GraphStore` is RM-012; :class:`VectorStore` is RM-032, once hybrid
+search (F-5, AD-8) made its required shape concrete -- declaring it any
+earlier would have meant guessing method signatures ahead of the ticket
+that actually needed them.
 
 AGENTS.md invariant 7: no raw SQL outside ``store/sqlite/``. Every query
 here is bounded (a ``limit``) per docs/design.md section 11.3 -- nothing in
-this codebase returns an unbounded result set.
+this codebase returns an unbounded result set. ``VectorStore`` inherits
+this for free on the vector side: ``sqlite-vec``'s own KNN syntax requires
+a ``k`` bound to run at all (confirmed directly -- there is no unbounded
+query form to accidentally reach for).
 """
 
 from __future__ import annotations
@@ -23,6 +26,7 @@ if TYPE_CHECKING:
     from collections.abc import Iterable, Mapping, Sequence
 
     from repomind.model import (
+        Chunk,
         Edge,
         EdgeKind,
         File,
@@ -262,3 +266,76 @@ class GraphStore(Protocol):
     ) -> None: ...
 
     def get_latest_index_run(self, repo_id: int) -> IndexRun | None: ...
+
+
+class VectorStore(Protocol):
+    """Chunk persistence, full-text search, and vector search (F-5, RM-032)
+    over one repository's chunks -- ``chunk`` / ``chunk_fts`` / ``chunk_vec``
+    in design.md section 4.2.
+
+    A separate protocol from :class:`GraphStore`, per design.md section
+    11.3 ("`GraphStore` and `VectorStore` protocols... swapping the backend
+    stays an implementation change"), even though today's one implementation
+    (:class:`~repomind.store.sqlite.graph.SqliteGraphStore`) satisfies both
+    against the same connection -- one SQLite file holding graph, FTS5, and
+    vectors together (design.md AD-2) is exactly what makes that possible,
+    not a reason to fuse the two interfaces.
+
+    Fusing ``search_fts`` and ``search_vector`` results by Reciprocal Rank
+    Fusion (design.md AD-8) is deliberately not this protocol's job: each
+    method here returns one retriever's own bounded, ranked results, and
+    RM-033's ``retrieve/search.py`` combines them. A store that fused
+    scores itself would make "swap sqlite-vec for an ANN index" (section
+    11.2's own named future) a change to the fusion algorithm too, not
+    just the vector backend.
+    """
+
+    def replace_chunks(self, file_id: int, chunks: Iterable[Chunk]) -> Sequence[Chunk]:
+        """Delete every existing chunk for ``file_id`` and insert ``chunks``
+        in its place, atomically -- the same idempotent-reindex contract
+        :meth:`GraphStore.replace_symbols` makes. ``chunk_fts`` stays in
+        sync automatically (schema.sql's own AFTER INSERT/DELETE/UPDATE
+        triggers on ``chunk``); this method never touches ``chunk_fts`` or
+        ``chunk_vec`` directly.
+        """
+        ...
+
+    def set_chunk_embeddings(self, embeddings: Mapping[int, Sequence[float]]) -> None:
+        """Store (or replace) each chunk's vector in ``chunk_vec``, keyed
+        by ``Chunk.id``. Separate from :meth:`replace_chunks` because
+        embedding is a distinct, potentially-slower step (an
+        :class:`~repomind.embed.base.Embedder` call) that can legitimately
+        fail on its own (design.md's failure table: embedding failure is
+        not a useful partial state) after chunks and their text are
+        already safely persisted.
+        """
+        ...
+
+    def get_chunk(self, chunk_id: int) -> Chunk | None: ...
+
+    def count_chunks(self, repo_id: int) -> int:
+        """For the index-completion summary (F-1 requirement 6), matching
+        :meth:`GraphStore.count_symbols_by_kind`'s own reporting role."""
+        ...
+
+    def search_fts(
+        self, repo_id: int, query: str, limit: int = DEFAULT_LIST_LIMIT
+    ) -> Sequence[tuple[Chunk, float]]:
+        """Full-text search via FTS5 BM25, best match first. The score is
+        BM25's own convention (more negative is a better match, per
+        SQLite's ``bm25()``), not normalised or comparable across a
+        different retriever's scores -- exactly why RRF (AD-8) fuses by
+        *rank*, never by combining these numbers directly.
+        """
+        ...
+
+    def search_vector(
+        self, repo_id: int, embedding: Sequence[float], limit: int = DEFAULT_LIST_LIMIT
+    ) -> Sequence[tuple[Chunk, float]]:
+        """K-nearest-neighbour vector search via ``sqlite-vec``, best match
+        first (smallest distance first). ``embedding`` must have the same
+        dimensionality the configured :class:`~repomind.embed.base.Embedder`
+        produces -- this method does not validate that itself; a mismatch
+        is a caller bug, not a runtime condition to degrade from.
+        """
+        ...
