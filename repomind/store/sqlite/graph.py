@@ -33,7 +33,7 @@ from repomind.model import (
 )
 
 if TYPE_CHECKING:
-    from collections.abc import Iterable, Sequence
+    from collections.abc import Iterable, Mapping, Sequence
 
 #: Bumped whenever schema.sql changes shape. A mismatch on an existing
 #: database means "prompt for --force reindex", never a silent migration
@@ -297,6 +297,13 @@ class SqliteGraphStore:
         ).fetchall()
         counts.update({r["kind"]: r["n"] for r in rows})
         return counts
+
+    def set_symbol_scip_ids(self, scip_symbol_by_id: Mapping[int, str]) -> None:
+        with self._conn:
+            self._conn.executemany(
+                "UPDATE symbol SET scip_symbol = ? WHERE id = ?",
+                [(scip_symbol, symbol_id) for symbol_id, scip_symbol in scip_symbol_by_id.items()],
+            )
 
     # -- edge ----------------------------------------------------------
 

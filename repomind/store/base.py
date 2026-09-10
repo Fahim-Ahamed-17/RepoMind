@@ -20,7 +20,7 @@ from __future__ import annotations
 from typing import TYPE_CHECKING, Protocol
 
 if TYPE_CHECKING:
-    from collections.abc import Iterable, Sequence
+    from collections.abc import Iterable, Mapping, Sequence
 
     from repomind.model import (
         Edge,
@@ -132,6 +132,20 @@ class GraphStore(Protocol):
 
     def count_symbols_by_kind(self, repo_id: int) -> dict[str, int]:
         """For the index-completion summary (F-1 requirement 6)."""
+        ...
+
+    def set_symbol_scip_ids(self, scip_symbol_by_id: Mapping[int, str]) -> None:
+        """Backfill ``Symbol.scip_symbol`` on already-persisted rows, keyed
+        by ``Symbol.id``.
+
+        RM-022: symbols are always persisted by ``replace_symbols`` *before*
+        SCIP ever runs (SCIP resolution needs the whole repo's symbol table
+        to exist first, same ordering constraint as the heuristic
+        resolver). Updates rows in place rather than going through
+        ``replace_symbols`` again, which would delete and reinsert with new
+        ids -- silently orphaning any edge already persisted against the
+        old ones.
+        """
         ...
 
     # -- edge ----------------------------------------------------------

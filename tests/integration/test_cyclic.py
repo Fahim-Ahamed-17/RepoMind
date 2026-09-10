@@ -28,7 +28,7 @@ def test_indexing_a_circular_import_repo_completes(
     out the test suite rather than fail it cleanly, which is exactly why
     this is worth asserting explicitly rather than trusting it implicitly.
     """
-    result = index_repository(cyclic_fixture_repo)
+    result = index_repository(cyclic_fixture_repo, use_scip=False)
     assert result.files_indexed == 4  # __init__, a, b, animals
     assert result.edge_counts["heuristic"] > 0
 
@@ -42,7 +42,7 @@ def test_reverse_deps_of_a_through_the_real_cycle_terminates_and_excludes_a(
     test_traversal.py::test_cycle_terminates_and_never_relists_the_seed.
     Must terminate, and A must never appear among its own dependents.
     """
-    index_repository(cyclic_fixture_repo)
+    index_repository(cyclic_fixture_repo, use_scip=False)
 
     root_path = normalize_repo_path(cyclic_fixture_repo)
     store = SqliteGraphStore(index_db_path(root_path))
@@ -71,7 +71,7 @@ def test_inheritance_chain_is_traversed_across_multiple_hops(
     """Animal <- Dog <- Puppy: Puppy must be reachable from Animal at
     depth 2 via INHERITS, not just Dog at depth 1.
     """
-    index_repository(cyclic_fixture_repo)
+    index_repository(cyclic_fixture_repo, use_scip=False)
 
     root_path = normalize_repo_path(cyclic_fixture_repo)
     store = SqliteGraphStore(index_db_path(root_path))

@@ -192,6 +192,47 @@ def test_count_edges_by_tier_prefills_zero_for_absent_tiers(
     assert counts == {t.value: 0 for t in Tier}
 
 
+def test_set_symbol_scip_ids_backfills_in_place_without_disturbing_ids(
+    store: SqliteGraphStore, repo_id: int
+) -> None:
+    """RM-022: backfilling scip_symbol must update the existing row, not
+    delete-and-reinsert (as replace_symbols does) -- an edge already
+    persisted against this symbol's id would otherwise be silently
+    orphaned. Asserted by checking the id is unchanged, not just that
+    scip_symbol ends up set.
+    """
+    f = store.upsert_file(File(repo_id=repo_id, path="a.py", lang="python", blob_sha="s"))
+    assert f.id is not None
+    (persisted,) = store.replace_symbols(
+        f.id,
+        [
+            Symbol(
+                repo_id=repo_id,
+                file_id=f.id,
+                kind=SymbolKind.FUNCTION,
+                name="f",
+                qualified_name="a.f",
+                start_line=1,
+                end_line=1,
+            )
+        ],
+    )
+    assert persisted.id is not None
+
+    store.set_symbol_scip_ids({persisted.id: "scip-python python . . a/f()."})
+
+    reloaded = store.get_symbol(persisted.id)
+    assert reloaded is not None
+    assert reloaded.id == persisted.id
+    assert reloaded.scip_symbol == "scip-python python . . a/f()."
+
+
+def test_set_symbol_scip_ids_with_empty_mapping_does_nothing(
+    store: SqliteGraphStore, repo_id: int
+) -> None:
+    store.set_symbol_scip_ids({})  # must not raise
+
+
 def test_cascade_delete_file_removes_its_symbols(store: SqliteGraphStore, repo_id: int) -> None:
     f = store.upsert_file(File(repo_id=repo_id, path="a.py", lang="python", blob_sha="s"))
     assert f.id is not None

@@ -76,6 +76,9 @@ packages = ["repomind"]
 line-length = 100
 target-version = "py311"
 src = ["repomind", "tests"]
+# Generated, not hand-written (RM-022) -- protoc's own output, regenerated
+# from scip.proto rather than edited; see scip_pb2.py's own header.
+extend-exclude = ["repomind/languages/python/scip_pb2.py", "repomind/languages/python/scip_pb2.pyi"]
 
 [tool.ruff.lint]
 select = [
@@ -139,6 +142,15 @@ ignore_missing_imports = true
 
 [[tool.mypy.overrides]]
 module = "tests.fixtures.*"
+ignore_errors = true
+
+[[tool.mypy.overrides]]
+# Generated, not hand-written (RM-022) -- protoc's own --pyi_out output
+# does not target mypy --strict (missing generic type args, a nested-class
+# name shadowing its own module-level type in one signature). Not this
+# project's invariant to maintain; see scip_pb2.py's own header for
+# regeneration instructions if scip.proto ever changes.
+module = "repomind.languages.python.scip_pb2"
 ignore_errors = true
 
 # ---------------------------------------------------------------- pytest

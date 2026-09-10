@@ -30,7 +30,7 @@ from rich.progress import BarColumn, Progress, TextColumn
 from repomind.analyze.reverse import DEFAULT_DEPTH, MAX_DEPTH, find_references
 from repomind.errors import RepoMindError
 from repomind.index.pipeline import IndexProgress, index_repository
-from repomind.model import Tier
+from repomind.model import ScipStatus, Tier
 from repomind.store.sqlite.graph import SqliteGraphStore
 from repomind.workspace import index_db_path, normalize_repo_path
 
@@ -59,14 +59,23 @@ def index(
     path: Path = typer.Argument(
         Path(), help="Repository to index. Defaults to the current directory."
     ),
+    no_scip: bool = typer.Option(
+        False,
+        "--no-scip",
+        help="Skip the SCIP subprocess entirely (F-1 requirement 10). Use this for "
+        "untrusted repositories: SCIP indexers execute in, and may import, the "
+        "target repo's own code (design.md AD-9, section 9.3).",
+    ),
 ) -> None:
     """Index a Python repository: parse it and persist its symbols and
     relationships.
 
-    M1+M2 scope so far -- symbols and heuristic-tier edges, not yet search
-    (M3) or answers (M4); the `resolved` tier needs SCIP (RM-022, not yet
-    landed). Always local: this command makes no network connection at
-    any point (AGENTS.md invariant 1).
+    M1+M2 scope -- symbols, heuristic-tier edges, and (unless --no-scip)
+    resolved-tier edges via SCIP; not yet search (M3) or answers (M4).
+    Always local: this command makes no network connection at any point
+    (AGENTS.md invariant 1) -- SCIP is a local subprocess, not a network
+    call, so it is unaffected by that invariant, but --no-scip is still the
+    right choice for code you do not trust to execute.
     """
     # Output below is deliberately ASCII-only. Rich's legacy Windows console
     # writer (the code path older cmd.exe-style terminals take) can fail
@@ -96,7 +105,7 @@ def index(
             )
 
         try:
-            result = index_repository(root, progress_callback=on_progress)
+            result = index_repository(root, progress_callback=on_progress, use_scip=not no_scip)
         except RepoMindError as exc:
             progress.stop()
             console.print(f"[red]error:[/red] {exc}")
@@ -110,10 +119,20 @@ def index(
         "  symbols:  " + ", ".join(f"{k}={v}" for k, v in result.symbol_counts.items() if v)
     )
     edges_summary = ", ".join(f"{k}={v}" for k, v in result.edge_counts.items())
-    console.print(
-        f"  edges:    {edges_summary}  [dim](resolved tier requires SCIP -- RM-022)[/dim]"
-    )
+    console.print(f"  edges:    {edges_summary}")
     console.print(f"  SHA:      {result.repo.indexed_sha or '[dim]none (not a git repo)[/dim]'}")
+
+    # "Tell the user" (docs/conventions.md Logging section) -- scip_status
+    # is recorded either way, but a degraded run is easy to miss in a
+    # summary that otherwise looks like full success.
+    if result.repo.scip_status == ScipStatus.DEGRADED:
+        console.print(
+            "  [yellow]warning:[/yellow] SCIP unavailable this run -- resolved-tier "
+            "edges are empty, heuristic tier only. Install scip-python "
+            "(`npm install -g @sourcegraph/scip-python`) and re-index to fix."
+        )
+    elif no_scip:
+        console.print("  [dim](SCIP skipped: --no-scip)[/dim]")
 
 
 @app.command()

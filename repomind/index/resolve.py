@@ -56,8 +56,9 @@ from typing import TYPE_CHECKING
 from repomind.model import Edge, EdgeKind, SymbolKind, Tier
 
 if TYPE_CHECKING:
-    from collections.abc import Iterable, Iterator, Sequence
+    from collections.abc import Iterable, Iterator, Mapping, Sequence
 
+    from repomind.languages.python.scip import ScipIndex
     from repomind.model import ParsedReference, ParsedSymbol, Symbol
 
 #: EdgeKind.INHERITS resolution additionally requires the match be one of
@@ -258,6 +259,75 @@ def resolve_heuristic_edges(
                     dst_symbol_id=dst.id,
                     kind=ref.kind,
                     tier=Tier.HEURISTIC,
+                    evidence_file_id=file_id,
+                    evidence_line=ref.evidence_line,
+                )
+            )
+
+    return edges
+
+
+def resolve_scip_edges(
+    repo_id: int,
+    all_symbols: Iterable[Symbol],
+    file_references: Iterable[tuple[int, Sequence[ParsedReference]]],
+    file_id_to_rel_path: Mapping[int, str],
+    scip_index: ScipIndex,
+    scip_symbol_to_our_id: Mapping[str, int],
+) -> list[Edge]:
+    """RM-022: turn the same raw ``ParsedReference`` data
+    :func:`resolve_heuristic_edges` consumes into ``resolved``-tier edges
+    instead, using ``scip-python``'s type-aware analysis in place of name
+    and scope matching.
+
+    The two tiers answer the same question -- "what does ``target_text``
+    at this evidence line refer to" -- with different evidence. Both can
+    (and often will) produce an edge for the very same relationship; that
+    is by design, not a bug to deduplicate away (design.md section 4.3,
+    AGENTS.md invariant 3: tiers are never merged). A caller wanting "the
+    best available answer" asks for ``resolved`` first and falls back to
+    ``heuristic``, rather than this module collapsing that choice for
+    them.
+
+    Where ``resolve_heuristic_edges`` matches by name, this matches by
+    *location*: ``scip_index.references`` already maps a reference
+    occurrence's ``(relative_path, line)`` straight to the scip symbol
+    string SCIP resolved it to (ambiguous same-line entries already
+    excluded -- see ``languages/python/scip.py``), and
+    ``scip_symbol_to_our_id`` (built by ``index/pipeline.py`` via
+    ``GraphStore.find_symbol_at_location`` against SCIP's own Definition
+    occurrences) maps that string to one of our persisted symbol ids. A
+    reference resolves here exactly when both lookups hit -- no scope
+    walking, no bare-name fallback, no ``allowed_kinds`` filtering of the
+    kind ``_resolve_one`` applies for the heuristic tier: SCIP's own
+    analysis is already type-aware, so second-guessing its target's kind
+    would only reject correct answers the heuristic tier's defensive
+    filtering exists to guess around in the first place.
+    """
+    index = _SymbolIndex(all_symbols)
+    edges: list[Edge] = []
+
+    for file_id, references in file_references:
+        rel_path = file_id_to_rel_path.get(file_id)
+        if rel_path is None:
+            continue  # should not happen -- every file_id here was just persisted
+        for ref in references:
+            src = index.exact(ref.src_qualified_name)
+            if src is None or src.id is None:
+                continue
+            scip_symbol = scip_index.references.get((rel_path, ref.evidence_line - 1))
+            if scip_symbol is None:
+                continue  # SCIP saw nothing here, or the line was ambiguous
+            dst_id = scip_symbol_to_our_id.get(scip_symbol)
+            if dst_id is None or dst_id == src.id:
+                continue  # target outside this repo (e.g. stdlib), or a self-reference
+            edges.append(
+                Edge(
+                    repo_id=repo_id,
+                    src_symbol_id=src.id,
+                    dst_symbol_id=dst_id,
+                    kind=ref.kind,
+                    tier=Tier.RESOLVED,
                     evidence_file_id=file_id,
                     evidence_line=ref.evidence_line,
                 )

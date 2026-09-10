@@ -23,7 +23,12 @@ from repomind.workspace import index_db_path, normalize_repo_path
 def test_indexes_all_files_with_correct_symbol_counts(
     isolated_workspace: Path, simple_fixture_repo: Path
 ) -> None:
-    result = index_repository(simple_fixture_repo)
+    # use_scip=False: this test is about symbol/edge extraction (M1/M2),
+    # not SCIP (RM-022) -- whether the real scip-python binary happens to
+    # be on this machine's PATH, and how it behaves, is not this test's
+    # concern and must not make it flaky. See test_scip_pipeline.py for
+    # the SCIP-specific wiring, tested with the subprocess boundary mocked.
+    result = index_repository(simple_fixture_repo, use_scip=False)
 
     assert result.files_indexed == 4
     assert result.files_skipped == 0
@@ -52,7 +57,7 @@ def test_indexes_all_files_with_correct_symbol_counts(
 def test_symbol_spans_and_qualified_names_are_correct(
     isolated_workspace: Path, simple_fixture_repo: Path
 ) -> None:
-    index_repository(simple_fixture_repo)
+    index_repository(simple_fixture_repo, use_scip=False)
 
     root_path = normalize_repo_path(simple_fixture_repo)
     store = SqliteGraphStore(index_db_path(root_path))
@@ -92,7 +97,7 @@ def test_specific_cross_file_edges_resolve_correctly(
     (tests/fixtures/simple/) -- see script.py, pkg/module_b.py,
     pkg/module_a.py.
     """
-    index_repository(simple_fixture_repo)
+    index_repository(simple_fixture_repo, use_scip=False)
 
     root_path = normalize_repo_path(simple_fixture_repo)
     store = SqliteGraphStore(index_db_path(root_path))
@@ -125,9 +130,7 @@ def test_specific_cross_file_edges_resolve_correctly(
 
         # The module-to-module import edges themselves.
         assert qname("pkg.module_b") in sources_of_kind("pkg.module_a.Widget", EdgeKind.IMPORTS)
-        assert qname("script") in sources_of_kind(
-            "pkg.module_b.build_default", EdgeKind.IMPORTS
-        )
+        assert qname("script") in sources_of_kind("pkg.module_b.build_default", EdgeKind.IMPORTS)
 
         # make_widget's return-type annotation (`-> Widget`) is a REFERENCES
         # edge, distinct from the CALLS edge its `return Widget(name)` body
@@ -152,8 +155,8 @@ def test_specific_cross_file_edges_resolve_correctly(
 
 
 def test_reindex_is_idempotent(isolated_workspace: Path, simple_fixture_repo: Path) -> None:
-    first = index_repository(simple_fixture_repo)
-    second = index_repository(simple_fixture_repo)
+    first = index_repository(simple_fixture_repo, use_scip=False)
+    second = index_repository(simple_fixture_repo, use_scip=False)
 
     assert first.symbol_counts == second.symbol_counts
     assert first.files_indexed == second.files_indexed
@@ -178,7 +181,7 @@ def test_progress_callback_reports_every_file(
     isolated_workspace: Path, simple_fixture_repo: Path
 ) -> None:
     seen: list[IndexProgress] = []
-    index_repository(simple_fixture_repo, progress_callback=seen.append)
+    index_repository(simple_fixture_repo, progress_callback=seen.append, use_scip=False)
 
     assert len(seen) == 4
     assert [p.files_done for p in seen] == [1, 2, 3, 4]
@@ -195,7 +198,7 @@ def test_skips_unsupported_and_undecodable_files(
     (repo_copy / "README.md").write_text("not python", encoding="utf-8")
     (repo_copy / "binary.py").write_bytes(b"\xff\xfe\x00\x01not valid utf-8 \xff")
 
-    result = index_repository(repo_copy)
+    result = index_repository(repo_copy, use_scip=False)
 
     assert result.files_indexed == 4  # the original 4 .py files
     assert result.files_skipped == 2  # README.md (unsupported) + binary.py (undecodable)
@@ -221,7 +224,7 @@ def test_a_failure_mid_run_marks_the_index_run_interrupted_not_stuck_running(
     monkeypatch.setattr(pipeline_module, "_index_one_file", _boom)
 
     with pytest.raises(IndexingError, match="simulated disk failure"):
-        index_repository(simple_fixture_repo)
+        index_repository(simple_fixture_repo, use_scip=False)
 
     root_path = normalize_repo_path(simple_fixture_repo)
     store = SqliteGraphStore(index_db_path(root_path))

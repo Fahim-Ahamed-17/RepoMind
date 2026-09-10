@@ -1,13 +1,9 @@
 """Index pipeline orchestration: discover -> parse -> resolve -> persist.
 
-RM-018 (symbols) + RM-020/RM-021 (edges). Still M2 scope only, per
-implementation-plan.md's staged delivery: symbols plus ``heuristic``-tier
-edges. No chunks or embeddings yet (RM-030 onward, M3), and no SCIP yet
-(RM-022, time-boxed, also M2) -- ``repo.scip_status`` stays SKIPPED here,
-not because SCIP failed, but because this pipeline does not attempt it
-yet.
+RM-018 (symbols) + RM-020/RM-021 (heuristic edges) + RM-022 (resolved
+edges via SCIP). No chunks or embeddings yet (RM-030 onward, M3).
 
-Edge computation happens in two passes, for the reason design.md's own
+Edge computation happens in three passes, for the reason design.md's own
 flow diagram separates them:
 
   * ``defines`` edges are computed *per file*, right after that file's
@@ -16,8 +12,18 @@ flow diagram separates them:
     so there is nothing to gain by waiting.
   * Every other kind (imports, inherits, calls, references) needs the
     *whole repo's* symbol table, since a reference routinely crosses file
-    boundaries -- these are deferred to one pass after every file has been
-    parsed and persisted (``_run``, calling ``resolve_heuristic_edges``).
+    boundaries -- deferred to one pass after every file has been parsed
+    and persisted (``_run``, calling ``resolve_heuristic_edges``).
+  * The same references are then given a *second* chance to resolve via
+    SCIP (``resolve_scip_edges``), which needs both the whole symbol table
+    (same reason as above) and SCIP's own subprocess output -- so it runs
+    last, after the heuristic pass, not instead of it. Per design.md AD-9,
+    a SCIP failure (missing binary, crash, timeout -- see
+    ``languages/python/scip.py``'s module docstring for why that is the
+    common case, not a rare one, on this project's own dev machine) is
+    caught here and degrades to ``scip_status = ScipStatus.DEGRADED``
+    rather than failing the run: the heuristic edges already persisted
+    stand regardless.
 
 Resumability, stated precisely (F-1 requirement 9: "a re-run resumes
 rather than restarting"): this pipeline's notion of resumability is
@@ -40,20 +46,41 @@ import time
 from pathlib import Path
 from typing import TYPE_CHECKING
 
-from repomind.errors import IndexingError
-from repomind.index.resolve import defines_edges_for_file, resolve_heuristic_edges
+import structlog
+
+from repomind.errors import IndexingError, ScipUnavailableError
+from repomind.index.resolve import (
+    defines_edges_for_file,
+    resolve_heuristic_edges,
+    resolve_scip_edges,
+)
 from repomind.ingest.discover import discover_files
 from repomind.ingest.git import current_sha
 from repomind.languages import get_language_pack_for_extension
+
+# Deliberately Python-specific, not dispatched through LanguagePack: RM-022
+# is Python-only by its own ticket scope. RM-071 (scip-typescript) is a
+# separate, later ticket -- if and when a second language needs SCIP, that
+# is where a per-language dispatch seam would be introduced, not invented
+# speculatively now for one caller.
+from repomind.languages.python.scip import run_scip_python
 from repomind.model import File, IndexRunStatus, Repo, ScipStatus, Symbol
 from repomind.store.sqlite.graph import SqliteGraphStore
-from repomind.workspace import index_db_path, index_lock, normalize_repo_path, register_repo
+from repomind.workspace import (
+    index_db_path,
+    index_lock,
+    normalize_repo_path,
+    register_repo,
+    repo_workspace_dir,
+)
 
 if TYPE_CHECKING:
-    from collections.abc import Callable
+    from collections.abc import Callable, Sequence
 
     from repomind.languages.base import LanguagePack
     from repomind.model import IndexRun, ParsedReference
+
+log = structlog.get_logger()
 
 
 @dataclasses.dataclass(frozen=True, slots=True)
@@ -82,9 +109,9 @@ class IndexResult:
     symbol_counts: dict[str, int]
     edge_counts: dict[str, int]
     """Keyed by tier (``resolved``/``heuristic``/``inferred``), per
-    design.md section 4.3 -- never merged. ``resolved`` is always 0 until
-    RM-022 lands; ``heuristic`` now reflects real ``defines`` and
-    resolved-reference edges (RM-020/RM-021)."""
+    design.md section 4.3 -- never merged. ``resolved`` is 0 whenever SCIP
+    was skipped (``--no-scip``) or degraded; ``heuristic`` reflects real
+    ``defines`` and resolved-reference edges regardless (RM-020/RM-021)."""
     elapsed_seconds: float
 
 
@@ -92,11 +119,22 @@ def index_repository(
     root: Path,
     *,
     progress_callback: Callable[[IndexProgress], None] | None = None,
+    use_scip: bool = True,
 ) -> IndexResult:
     """Index ``root`` and persist the result to its central workspace
     (``~/.repomind/repos/<hash>/index.db``, design.md AD-5). Holds the
     repo's advisory lock for the duration
     (:func:`repomind.workspace.index_lock`).
+
+    ``use_scip=False`` is ``--no-scip`` (F-1 requirement 10): skip the SCIP
+    subprocess entirely rather than attempt and degrade. This is a genuine
+    security control, not a convenience flag -- design.md AD-9 and section
+    9.3 both state plainly that indexing an untrusted repository with SCIP
+    enabled is equivalent to running that repository's build (SCIP
+    indexers execute in, and may import, the target repo's own code). The
+    resulting ``repo.scip_status`` is ``SKIPPED`` (never attempted), which
+    reads differently from ``DEGRADED`` (attempted, failed) on purpose --
+    see ``repomind.model.ScipStatus``.
     """
     started = time.monotonic()
     root = root.resolve()
@@ -105,7 +143,7 @@ def index_repository(
     with index_lock(root_path_str):
         store = SqliteGraphStore(index_db_path(root_path_str))
         try:
-            result = _run(root, root_path_str, store, progress_callback)
+            result = _run(root, root_path_str, store, progress_callback, use_scip=use_scip)
         finally:
             store.close()
 
@@ -118,6 +156,8 @@ def _run(
     root_path_str: str,
     store: SqliteGraphStore,
     progress_callback: Callable[[IndexProgress], None] | None,
+    *,
+    use_scip: bool,
 ) -> IndexResult:
     repo = store.upsert_repo(Repo(root_path=root_path_str))
     assert repo.id is not None  # upsert_repo always assigns one
@@ -137,6 +177,12 @@ def _run(
     # reference needs the complete symbol table, which does not exist
     # until every file has been persisted. See this module's docstring.
     file_references: list[tuple[int, list[ParsedReference]]] = []
+    # RM-022: SCIP's own output is keyed by relative path, not our file
+    # ids -- built alongside file_references at zero extra store cost
+    # (every file_id here was already returned by _index_one_file above),
+    # rather than a second pass over store.list_files, which is capped at
+    # DEFAULT_LIST_LIMIT and so is not safe to rely on for "every file".
+    file_id_to_rel_path: dict[int, str] = {}
     try:
         for i, disc in enumerate(discovered, start=1):
             pack = get_language_pack_for_extension(disc.abs_path.suffix)
@@ -154,6 +200,7 @@ def _run(
                         store, repo.id, disc.rel_path, text, blob_sha, pack
                     )
                     file_references.append((file_id, references))
+                    file_id_to_rel_path[file_id] = disc.rel_path
                     files_indexed += 1
 
             store.update_index_run_progress(run.id, i)
@@ -171,7 +218,18 @@ def _run(
         heuristic_edges = resolve_heuristic_edges(repo.id, all_symbols, file_references)
         store.insert_edges(heuristic_edges)
 
-        store.set_repo_indexed_sha(repo.id, to_sha, ScipStatus.SKIPPED)
+        scip_status = _run_scip(
+            store,
+            repo.id,
+            root,
+            root_path_str,
+            file_id_to_rel_path,
+            file_references,
+            all_symbols,
+            use_scip=use_scip,
+        )
+
+        store.set_repo_indexed_sha(repo.id, to_sha, scip_status)
         store.finish_index_run(run.id, IndexRunStatus.OK)
     except Exception as exc:
         # Deliberately broad: this is the top-level run boundary. Any
@@ -192,6 +250,71 @@ def _run(
         edge_counts=store.count_edges_by_tier(repo_id),
         elapsed_seconds=0.0,  # filled in by index_repository, once total is known
     )
+
+
+def _run_scip(
+    store: SqliteGraphStore,
+    repo_id: int,
+    root: Path,
+    root_path_str: str,
+    file_id_to_rel_path: dict[int, str],
+    file_references: list[tuple[int, list[ParsedReference]]],
+    all_symbols: Sequence[Symbol],
+    *,
+    use_scip: bool,
+) -> ScipStatus:
+    """RM-022: attempt SCIP resolution and report how it went.
+
+    Never raises: a SCIP failure is exactly the case
+    :class:`ScipUnavailableError` exists to carry, caught here and turned
+    into ``DEGRADED`` per design.md AD-9 ("degrade loudly: log, record
+    status, tell the user" -- docs/conventions.md's Logging section, whose
+    own worked example is this exact situation). ``use_scip=False`` skips
+    the attempt entirely, distinct from an attempt that failed -- see
+    :func:`index_repository`'s docstring on why ``SKIPPED`` and
+    ``DEGRADED`` must stay distinguishable.
+    """
+    if not use_scip:
+        return ScipStatus.SKIPPED
+
+    try:
+        scip_index = run_scip_python(root, repo_workspace_dir(root_path_str) / "index.scip")
+    except ScipUnavailableError as exc:
+        log.warning("scip.degraded", repo=repo_id, reason=str(exc))
+        return ScipStatus.DEGRADED
+
+    # rel_path is unique per (repo_id, path) -- File's own uniqueness
+    # constraint (schema.sql) -- so inverting file_id_to_rel_path back to
+    # rel_path -> file_id is lossless.
+    rel_path_to_file_id = {path: file_id for file_id, path in file_id_to_rel_path.items()}
+
+    # SCIP symbol string -> our own persisted Symbol.id, built from SCIP's
+    # Definition occurrences via find_symbol_at_location (same technique
+    # index/resolve.py's own docstring points to). A (path, line) with no
+    # entry in rel_path_to_file_id is a document SCIP type-checked that we
+    # never indexed ourselves (stdlib, an installed dependency) -- not an
+    # error, just nothing to attach it to.
+    scip_symbol_to_our_id: dict[str, int] = {}
+    for (rel_path, line), scip_symbol in scip_index.definitions.items():
+        file_id = rel_path_to_file_id.get(rel_path)
+        if file_id is None:
+            continue
+        sym = store.find_symbol_at_location(file_id, line + 1)  # SCIP is 0-indexed
+        if sym is not None and sym.id is not None:
+            scip_symbol_to_our_id[scip_symbol] = sym.id
+
+    store.set_symbol_scip_ids({our_id: s for s, our_id in scip_symbol_to_our_id.items()})
+
+    resolved_edges = resolve_scip_edges(
+        repo_id,
+        all_symbols,
+        file_references,
+        file_id_to_rel_path,
+        scip_index,
+        scip_symbol_to_our_id,
+    )
+    store.insert_edges(resolved_edges)
+    return ScipStatus.OK
 
 
 def _index_one_file(
