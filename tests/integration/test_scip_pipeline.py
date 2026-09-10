@@ -21,7 +21,7 @@ import pytest
 from repomind.errors import ScipUnavailableError
 from repomind.index import pipeline as pipeline_module
 from repomind.index.pipeline import index_repository
-from repomind.languages.python.scip import ScipIndex
+from repomind.languages.python.scip import ScipIndex, is_available
 from repomind.model import ScipStatus, Tier
 from repomind.store.sqlite.graph import SqliteGraphStore
 from repomind.workspace import index_db_path, normalize_repo_path
@@ -83,6 +83,52 @@ def test_scip_success_produces_a_resolved_edge_and_backfills_scip_symbol(
 
         resolved_edges = store.edges_to(make_widget.id, tiers=(Tier.RESOLVED,))
         assert {e.src_symbol_id for e in resolved_edges} == {build_default.id}
+    finally:
+        store.close()
+
+
+@pytest.mark.scip
+@pytest.mark.skipif(not is_available(), reason="scip-python not on PATH")
+def test_real_scip_python_resolves_the_known_relationships_in_the_simple_fixture(
+    isolated_workspace: Path, simple_fixture_repo: Path
+) -> None:
+    """The one test in this suite that invokes the real ``scip-python``
+    binary end to end -- everything else here fakes ``run_scip_python`` at
+    the seam (see this module's docstring for why). Guarded by
+    ``skipif(not is_available())`` so it self-skips on any machine without
+    ``scip-python`` on PATH rather than fail the suite there; wherever it
+    does run, it locks in the exact three real relationships confirmed by
+    hand while diagnosing RM-022's Windows-compatibility issues (pinned
+    version 0.3.0, no ``--cwd``, a relative ``--output``, ``--exclude`` for
+    dependency directories -- see scip.py's own module docstring for why
+    each of those is load-bearing, not incidental).
+    """
+    result = index_repository(simple_fixture_repo)  # use_scip defaults to True
+
+    assert result.repo.scip_status == ScipStatus.OK
+    assert result.edge_counts["resolved"] == 3
+
+    root_path = normalize_repo_path(simple_fixture_repo)
+    store = SqliteGraphStore(index_db_path(root_path))
+    try:
+        repo = store.get_repo_by_path(root_path)
+        assert repo is not None and repo.id is not None
+
+        def qname(name: str) -> int:
+            sym = store.find_symbol_by_qualified_name(repo.id, name)
+            assert sym is not None and sym.id is not None, name
+            return sym.id
+
+        def resolved_sources(target: str) -> set[int]:
+            edges = store.edges_to(qname(target), tiers=(Tier.RESOLVED,))
+            return {e.src_symbol_id for e in edges}
+
+        # pkg.module_b.build_default's own `-> Widget` return annotation.
+        assert qname("pkg.module_b.build_default") in resolved_sources("pkg.module_a.Widget")
+        # script.main() calls build_default().
+        assert qname("script.main") in resolved_sources("pkg.module_b.build_default")
+        # The `if __name__ == "__main__": main()` call at module scope.
+        assert qname("script") in resolved_sources("script.main")
     finally:
         store.close()
 

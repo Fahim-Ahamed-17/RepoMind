@@ -129,7 +129,8 @@ def index(
         console.print(
             "  [yellow]warning:[/yellow] SCIP unavailable this run -- resolved-tier "
             "edges are empty, heuristic tier only. Install scip-python "
-            "(`npm install -g @sourcegraph/scip-python`) and re-index to fix."
+            "(`npm install -g @sourcegraph/scip-python@0.3.0` -- not `latest`, which "
+            "crashes on Windows) and re-index to fix."
         )
     elif no_scip:
         console.print("  [dim](SCIP skipped: --no-scip)[/dim]")

@@ -19,11 +19,11 @@ flow diagram separates them:
     (same reason as above) and SCIP's own subprocess output -- so it runs
     last, after the heuristic pass, not instead of it. Per design.md AD-9,
     a SCIP failure (missing binary, crash, timeout -- see
-    ``languages/python/scip.py``'s module docstring for why that is the
-    common case, not a rare one, on this project's own dev machine) is
-    caught here and degrades to ``scip_status = ScipStatus.DEGRADED``
-    rather than failing the run: the heuristic edges already persisted
-    stand regardless.
+    ``languages/python/scip.py``'s module docstring for the specific,
+    empirically-confirmed Windows failure modes it works around) is caught
+    here and degrades to ``scip_status = ScipStatus.DEGRADED`` rather than
+    failing the run: the heuristic edges already persisted stand
+    regardless.
 
 Resumability, stated precisely (F-1 requirement 9: "a re-run resumes
 rather than restarting"): this pipeline's notion of resumability is
@@ -223,6 +223,7 @@ def _run(
             repo.id,
             root,
             root_path_str,
+            to_sha,
             file_id_to_rel_path,
             file_references,
             all_symbols,
@@ -257,6 +258,7 @@ def _run_scip(
     repo_id: int,
     root: Path,
     root_path_str: str,
+    to_sha: str | None,
     file_id_to_rel_path: dict[int, str],
     file_references: list[tuple[int, list[ParsedReference]]],
     all_symbols: Sequence[Symbol],
@@ -278,7 +280,11 @@ def _run_scip(
         return ScipStatus.SKIPPED
 
     try:
-        scip_index = run_scip_python(root, repo_workspace_dir(root_path_str) / "index.scip")
+        scip_index = run_scip_python(
+            root,
+            repo_workspace_dir(root_path_str) / "index.scip",
+            project_version=to_sha,
+        )
     except ScipUnavailableError as exc:
         log.warning("scip.degraded", repo=repo_id, reason=str(exc))
         return ScipStatus.DEGRADED
