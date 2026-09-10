@@ -52,7 +52,7 @@ flowchart TB
     subgraph P["Pluggable adapters"]
         LANG["languages<br/>python - typescript"]
         LLMP["llm<br/>openai - anthropic - ollama - null"]
-        EMB["embed<br/>sentence-transformers"]
+        EMB["embed<br/>fastembed"]
     end
 
     SQL[("SQLite<br/>graph + meta + FTS5 + sqlite-vec")]
@@ -99,7 +99,7 @@ repomind/
 │   ├── incremental.py   SHA diff, invalidation, neighbour recompute
 │   └── chunker.py       Symbol-boundary chunking
 │
-├── embed/               Protocol + local sentence-transformers implementation
+├── embed/               Protocol + local fastembed implementation
 │
 ├── retrieve/
 │   ├── search.py        Vector + FTS5, fused by RRF (AD-8)
