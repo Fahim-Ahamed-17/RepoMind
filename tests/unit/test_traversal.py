@@ -42,8 +42,13 @@ class _Graph:
     def symbols(self, *names: str) -> None:
         rows = [
             Symbol(
-                repo_id=self.repo_id, file_id=self.file_id, kind=SymbolKind.FUNCTION,
-                name=n, qualified_name=n, start_line=i + 1, end_line=i + 1,
+                repo_id=self.repo_id,
+                file_id=self.file_id,
+                kind=SymbolKind.FUNCTION,
+                name=n,
+                qualified_name=n,
+                start_line=i + 1,
+                end_line=i + 1,
             )
             for i, n in enumerate(names)
         ]
@@ -60,8 +65,11 @@ class _Graph:
         self.store.insert_edges(
             [
                 Edge(
-                    repo_id=self.repo_id, src_symbol_id=self.id_of(src),
-                    dst_symbol_id=self.id_of(dst), kind=kind, tier=tier,
+                    repo_id=self.repo_id,
+                    src_symbol_id=self.id_of(src),
+                    dst_symbol_id=self.id_of(dst),
+                    kind=kind,
+                    tier=tier,
                 )
             ]
         )
@@ -74,9 +82,7 @@ class _Graph:
         """
         id_to_name = {v: k for k, v in self._by_name.items()}
         results = self.store.reverse_dependencies(self.id_of(of), max_depth, tiers)
-        return sorted(
-            (id_to_name[edge.src_symbol_id], depth, edge.kind) for edge, depth in results
-        )
+        return sorted((id_to_name[edge.src_symbol_id], depth, edge.kind) for edge, depth in results)
 
 
 def test_direct_caller_at_depth_one(store: SqliteGraphStore) -> None:

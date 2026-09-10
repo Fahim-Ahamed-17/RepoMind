@@ -251,7 +251,11 @@ class _Extractor:
 
             if node.type == "function_definition":
                 self._visit_function(
-                    node, start_point, decorators, scope_prefix, parent_qualified_name,
+                    node,
+                    start_point,
+                    decorators,
+                    scope_prefix,
+                    parent_qualified_name,
                     is_method=in_class,
                 )
             elif node.type == "class_definition":
@@ -431,9 +435,7 @@ class _Extractor:
         else:
             return []
 
-        names = [
-            _dotted_text_of_import_name(c, self._source) for c in node.named_children[1:]
-        ]
+        names = [_dotted_text_of_import_name(c, self._source) for c in node.named_children[1:]]
         resolved_names = [n for n in names if n is not None]
         if not resolved_names:
             # A bare `from X import *`, or nothing recognisable followed the
@@ -566,6 +568,7 @@ class _Extractor:
                     evidence_line=evidence_line,
                 )
             )
+
 
 def parse_python_file(path: Path, text: str, blob_sha: str) -> ParsedFile:
     source = text.encode("utf-8")
