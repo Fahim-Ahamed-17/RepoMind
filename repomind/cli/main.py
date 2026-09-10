@@ -176,9 +176,16 @@ def refs(
                     if hit.evidence_path is not None
                     else "(no evidence location)"
                 )
+                # Rich markup, not literal brackets: console.print() treats a
+                # bare "[xxx]" as a style tag and silently drops anything it
+                # doesn't recognise (verified directly against this failure
+                # mode -- an earlier version tried literal "[function]" and
+                # every kind label vanished with no error at all). "[dim]"
+                # here is real markup, styling hit.source.kind.value itself,
+                # not decorative brackets around it.
                 console.print(
-                    f"  depth={hit.depth}  {hit.source.qualified_name}"
-                    f"  [dim]({hit.kind.value}, {loc})[/dim]"
+                    f"  depth={hit.depth}  [dim]{hit.source.kind.value}[/dim] "
+                    f"{hit.source.qualified_name}  [dim]({hit.kind.value}, {loc})[/dim]"
                 )
     finally:
         store.close()
