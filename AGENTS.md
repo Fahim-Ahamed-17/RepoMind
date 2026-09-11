@@ -82,6 +82,20 @@ No HTTP calls, no API calls, no LLM calls anywhere in the indexing path. Tests a
 patching `socket.socket` to raise. Do not add a network call to make indexing "smarter" — the
 whole positioning collapses if the repository is uploaded.
 
+**One narrow, explicit exception (confirmed 2026-09-10):** on a machine with no cached embedding
+model, the first `repomind index` run fetches `bge-small-en-v1.5`'s weights from HuggingFace once
+and caches it locally (design.md section 12's "Embedding model download fails" row and section 13
+both anticipate this). That fetch requests a fixed public model artifact and sends no repository
+content whatsoever — it happens inside `LocalEmbedder._ensure_loaded()`, before any repo-derived
+text is ever passed to `.embed()`. It does not weaken the invariant this rule protects (the index,
+and everything derived from the repository, never leaves the machine); it is not license for any
+other network call anywhere in indexing. Because blanket socket-patching cannot distinguish "fetch
+our own model weights" from "leak repo content," tests do not exercise this path at all — every
+test fakes `LocalEmbedder` (see `tests/conftest.py`'s `fake_embedder`), so indexing stays
+network-free in the suite regardless of local cache state, and the one test that loads the real
+model (`tests/unit/test_embed.py`, `embedding_model` marker) talks to it directly, never through
+the indexing path.
+
 ### 2. No LLM at index time
 
 Do not add per-file LLM summarization. Cloud tools do this, which is exactly why they must upload

@@ -52,13 +52,21 @@ def commits_behind(root: Path, from_sha: str, to_sha: str = "HEAD") -> int | Non
         return None
 
 
-def changed_paths_since(root: Path, from_sha: str, to_sha: str = "HEAD") -> set[str]:
-    """Repo-relative paths that differ between two commits. The primitive
-    RM-034's incremental invalidation (M3) builds on; not exercised by M1's
-    pipeline, which always does a full index.
+def changed_paths_since(root: Path, from_sha: str, to_sha: str = "HEAD") -> set[str] | None:
+    """Repo-relative paths that differ between two commits -- the
+    primitive RM-034's incremental invalidation (M3) builds on.
+
+    ``None``, not an exception, whenever this can't be answered: same
+    cases as :func:`commits_behind` (not a git repo, or ``from_sha`` is no
+    longer reachable, e.g. a rebase or history rewrite since that index
+    was built). The caller's honest response is a full re-index, the same
+    way "unknown drift" is the honest ``status`` answer -- not a crash.
     """
-    repo = GitRepo(root, search_parent_directories=False)
-    diff_output = repo.git.diff("--name-only", f"{from_sha}..{to_sha}")
+    try:
+        repo = GitRepo(root, search_parent_directories=False)
+        diff_output = repo.git.diff("--name-only", f"{from_sha}..{to_sha}")
+    except (InvalidGitRepositoryError, NoSuchPathError, GitCommandError):
+        return None
     return {line for line in diff_output.splitlines() if line}
 
 

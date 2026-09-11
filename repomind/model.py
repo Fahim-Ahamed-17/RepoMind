@@ -273,6 +273,31 @@ class ParsedReference:
 
 
 @dataclass(frozen=True, slots=True)
+class ParsedChunk:
+    """A retrieval unit as computed by ``index/chunker.py`` (RM-030),
+    before it has a database identity -- mirrors :class:`ParsedSymbol`'s
+    own relationship to :class:`Symbol`: ``index/pipeline.py`` assigns
+    ``repo_id``/``file_id`` (and resolves ``symbol_qualified_name`` to a
+    ``symbol_id``) when persisting these as :class:`Chunk` rows.
+    """
+
+    start_line: int
+    end_line: int
+    text: str
+    """Not always a verbatim slice of the source file: a chunk produced by
+    splitting an oversized symbol repeats a synthesised signature/docstring
+    header ahead of each part after the first, so every chunk stays
+    self-describing on its own (design.md section 10, "Chunk sizing").
+    ``start_line``/``end_line`` still describe only the real source span
+    this chunk covers, never the synthesised header."""
+
+    n_tokens: int
+    symbol_qualified_name: str | None
+    """``None`` for the file-level remainder outside any chunk-worthy
+    symbol -- mirrors :attr:`Chunk.symbol_id`."""
+
+
+@dataclass(frozen=True, slots=True)
 class ParsedFile:
     """The result of parsing one file: its symbols and raw references,
     ready for persistence and resolution respectively.

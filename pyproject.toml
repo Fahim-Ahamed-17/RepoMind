@@ -26,11 +26,12 @@ dependencies = [
     "tree-sitter>=0.23,<0.24",
     "tree-sitter-python>=0.23,<0.24",
     "sqlite-vec>=0.1.6,<0.2",
-    # NOTE (M3 / RM-031): sentence-transformers pulls torch, roughly 2 GB.
-    # That is in tension with the five-minute install target in
-    # docs/project-document.md section 15. Evaluate `fastembed` (ONNX, no
-    # torch) as a drop-in before RM-031 lands. Tracked as an open question.
-    "sentence-transformers>=3.0,<4.0",
+    # RM-031: fastembed, not sentence-transformers -- the latter pulls
+    # torch, roughly 2 GB, in real tension with the five-minute install
+    # target (project-document.md section 15). Confirmed directly before
+    # switching: fastembed adds ~150 MB, no torch, and produces the same
+    # bge-small-en-v1.5 vectors design.md specifies. See embed/local.py.
+    "fastembed>=0.8,<0.9",
     "typer>=0.12,<0.16",
     "rich>=13.7,<15",
     "GitPython>=3.1,<4",
@@ -38,7 +39,7 @@ dependencies = [
     "tiktoken>=0.7,<0.9",
     "protobuf>=5.26,<7",       # SCIP index parsing
     "httpx>=0.27,<0.29",       # Ollama and OpenAI-compatible endpoints
-    "platformdirs>=4.2,<5",    # ~/.repomind resolution across platforms
+    "platformdirs>=4.2,<5",    # embedding model cache location (embed/local.py)
     "keyring>=25.0,<26",       # API keys never touch config files
 ]
 
@@ -129,7 +130,6 @@ plugins = []
 [[tool.mypy.overrides]]
 module = [
     "sqlite_vec.*",
-    "sentence_transformers.*",
     "tree_sitter",
     "tree_sitter.*",
     "tree_sitter_python",
@@ -139,6 +139,21 @@ module = [
     "mcp.*",
 ]
 ignore_missing_imports = true
+
+[[tool.mypy.overrides]]
+# RM-031: fastembed's own type stubs are fine (it ships py.typed), but its
+# TextEmbedding.embed() return annotation reaches into numpy's typing
+# internals, and the installed numpy (2.5.3) ships a stub using syntax
+# mypy only allows when python_version >= 3.12 -- a real conflict with
+# this project's python_version = "3.11" (matching requires-python),
+# confirmed directly: ignore_missing_imports does not help here (the
+# stub exists and resolves fine on its own), only skipping the deep
+# resolution of the class fastembed's own call sites pull in does.
+# embed/local.py already types its one fastembed value as Any rather
+# than lean on this for real type safety; this just stops mypy from
+# refusing to finish checking the file at all.
+module = ["fastembed", "fastembed.*", "numpy", "numpy.*"]
+follow_imports = "skip"
 
 [[tool.mypy.overrides]]
 module = "tests.fixtures.*"
@@ -168,8 +183,20 @@ markers = [
     "provider: needs a live LLM provider; excluded from CI",
     "slow: takes more than a few seconds",
     "scip: needs scip-python or scip-typescript on PATH",
+    "embedding_model: downloads/loads the real local embedding model; excluded from CI by default",
 ]
-filterwarnings = ["error", "ignore::DeprecationWarning:tree_sitter.*"]
+filterwarnings = [
+    "error",
+    "ignore::DeprecationWarning:tree_sitter.*",
+    # RM-031: huggingface_hub's own symlink-support warning on Windows
+    # without Developer Mode enabled -- "Caching files will still work
+    # but in a degraded version that might require more space on your
+    # disk," by its own wording. Confirmed directly: without this, the
+    # real embedding_model-marked test in test_embed.py fails on this
+    # dev machine purely from --strict warnings promoting it to an
+    # exception, not from any real failure in embed/local.py.
+    "ignore::UserWarning:huggingface_hub.*",
+]
 
 # ---------------------------------------------------------------- coverage
 

@@ -1,13 +1,14 @@
-"""SQLite implementation of :class:`repomind.store.base.GraphStore`.
+"""SQLite implementation of :class:`repomind.store.base.GraphStore` and
+:class:`repomind.store.base.VectorStore`.
 
-RM-012. All raw SQL for the graph lives here and nowhere else in the
-codebase (AGENTS.md invariant 7) -- this is the file a future backend swap
-(design.md section 11.3) would replace.
-
-Deliberately out of scope for this ticket, per implementation-plan.md's
-staged delivery:
-  * Multi-hop traversal (the recursive CTE, design.md section 4.4) -- RM-024.
-  * chunk / chunk_fts / chunk_vec (VectorStore) -- RM-030 through RM-032.
+RM-012 (graph), RM-024 (multi-hop traversal), RM-032 (chunks, FTS5,
+sqlite-vec) -- one class satisfying both protocols against one
+connection, matching design.md AD-2's "one SQLite file per repo, holding
+graph, metadata, FTS5, and vectors via sqlite-vec." All raw SQL for
+either protocol lives here and nowhere else in the codebase (AGENTS.md
+invariant 7) -- this is the file a future backend swap (design.md section
+11.3) would replace, independently per protocol if only one side of it
+needs replacing.
 """
 
 from __future__ import annotations
@@ -18,8 +19,11 @@ from importlib import resources
 from pathlib import Path
 from typing import TYPE_CHECKING
 
+import sqlite_vec
+
 from repomind.errors import SchemaVersionError
 from repomind.model import (
+    Chunk,
     Edge,
     EdgeKind,
     File,
@@ -39,7 +43,8 @@ if TYPE_CHECKING:
 #: database means "prompt for --force reindex", never a silent migration
 #: (design.md section 12: "a wrong silent migration is worse than a rebuild
 #: that takes five minutes").
-CURRENT_SCHEMA_VERSION = 1
+#: 2 (RM-032): chunk_fts sync triggers added.
+CURRENT_SCHEMA_VERSION = 2
 
 DEFAULT_LIST_LIMIT = 1000
 
@@ -62,7 +67,27 @@ class SqliteGraphStore:
         self._conn.row_factory = sqlite3.Row
         self._conn.execute("PRAGMA foreign_keys = ON")
         self._conn.execute("PRAGMA journal_mode = WAL")
+        self._load_vec_extension()
         self._ensure_schema()
+
+    def _load_vec_extension(self) -> None:
+        """``sqlite-vec`` is a runtime-loaded extension (design.md AD-2):
+        unlike FTS5, which is compiled into most SQLite builds, ``vec0``
+        must be loaded onto *this* connection before ``chunk_vec`` can be
+        created or queried -- and again on every future connection to the
+        same file, since a loaded extension is a property of the
+        connection, not something a schema version on disk can remember.
+        Extension loading is disabled again immediately after, matching
+        ``sqlite-vec``'s own documented usage -- there is no reason for
+        this connection to load arbitrary further extensions afterwards.
+        """
+        self._conn.enable_load_extension(True)
+        sqlite_vec.load(self._conn)
+        self._conn.enable_load_extension(False)
+        self._conn.execute(
+            "CREATE VIRTUAL TABLE IF NOT EXISTS chunk_vec USING "
+            "vec0(chunk_id INTEGER PRIMARY KEY, embedding FLOAT[384])"
+        )
 
     def close(self) -> None:
         self._conn.close()
@@ -97,17 +122,35 @@ class SqliteGraphStore:
     # -- repo ----------------------------------------------------------
 
     def upsert_repo(self, repo: Repo) -> Repo:
+        """Ensures a row for ``repo.root_path`` exists, creating one on
+        first call. On conflict, only the fields ``repo`` actually
+        supplies (non-``None``) are updated -- ``COALESCE`` against the
+        existing row, not a blind overwrite. index/pipeline.py's own
+        ``_run`` calls this every single run with a bare
+        ``Repo(root_path=...)`` just to fetch the row's id, then reads
+        ``indexed_sha`` to pick the incremental diff base (RM-034). A
+        blind overwrite would clear that on every call and restore it
+        only if *that* run reached :meth:`set_repo_indexed_sha` -- so one
+        interrupted run would silently downgrade the next to a full
+        re-index. tests/unit/test_store_sqlite.py's
+        ``test_upsert_repo_does_not_wipe_fields_it_was_not_given`` covers
+        it, and fails against the previous blind-overwrite version.
+
+        Returns the row as persisted, not the argument echoed back: after
+        a ``COALESCE`` the two genuinely differ, and handing a caller
+        fields that do not match what is stored is the same class of trap.
+        """
         with self._conn:
             cur = self._conn.execute(
                 """
                 INSERT INTO repo (root_path, remote_url, indexed_sha, indexed_at, scip_status)
                 VALUES (:root_path, :remote_url, :indexed_sha, :indexed_at, :scip_status)
                 ON CONFLICT(root_path) DO UPDATE SET
-                    remote_url = excluded.remote_url,
-                    indexed_sha = excluded.indexed_sha,
-                    indexed_at = excluded.indexed_at,
-                    scip_status = excluded.scip_status
-                RETURNING id
+                    remote_url = COALESCE(excluded.remote_url, repo.remote_url),
+                    indexed_sha = COALESCE(excluded.indexed_sha, repo.indexed_sha),
+                    indexed_at = COALESCE(excluded.indexed_at, repo.indexed_at),
+                    scip_status = COALESCE(excluded.scip_status, repo.scip_status)
+                RETURNING *
                 """,
                 {
                     "root_path": repo.root_path,
@@ -117,15 +160,8 @@ class SqliteGraphStore:
                     "scip_status": repo.scip_status.value if repo.scip_status else None,
                 },
             )
-            (new_id,) = cur.fetchone()
-        return Repo(
-            id=new_id,
-            root_path=repo.root_path,
-            remote_url=repo.remote_url,
-            indexed_sha=repo.indexed_sha,
-            indexed_at=repo.indexed_at,
-            scip_status=repo.scip_status,
-        )
+            row = cur.fetchone()
+        return _row_to_repo(row)
 
     def get_repo(self, repo_id: int) -> Repo | None:
         row = self._conn.execute("SELECT * FROM repo WHERE id = ?", (repo_id,)).fetchone()
@@ -511,6 +547,118 @@ class SqliteGraphStore:
         ).fetchone()
         return _row_to_index_run(row) if row else None
 
+    # -- chunk / FTS5 / sqlite-vec (VectorStore) --------------------------
+
+    def replace_chunks(self, file_id: int, chunks: Iterable[Chunk]) -> Sequence[Chunk]:
+        """Mirrors :meth:`replace_symbols` exactly: delete this file's
+        existing chunks, insert the given ones. Both ``chunk_fts`` and
+        ``chunk_vec`` follow automatically via schema.sql's own ``chunk_ad``
+        trigger, which fires on this method's own DELETE just as it does
+        on a cascaded one from :meth:`delete_file`/:meth:`delete_repo` --
+        this method never touches either table directly. ``chunk_vec``
+        specifically has no FK to enforce that cleanup itself (sqlite-vec's
+        ``vec0`` module does not support one), which is exactly why
+        ``chunk_ad`` deletes from it explicitly rather than relying on
+        ``ON DELETE CASCADE`` the way ``symbol``/``edge`` do.
+        """
+        result: list[Chunk] = []
+        with self._conn:
+            self._conn.execute("DELETE FROM chunk WHERE file_id = ?", (file_id,))
+            for chunk in chunks:
+                cur = self._conn.execute(
+                    """
+                    INSERT INTO chunk
+                        (repo_id, file_id, symbol_id, start_line, end_line, text, n_tokens)
+                    VALUES (?, ?, ?, ?, ?, ?, ?)
+                    """,
+                    (
+                        chunk.repo_id,
+                        file_id,
+                        chunk.symbol_id,
+                        chunk.start_line,
+                        chunk.end_line,
+                        chunk.text,
+                        chunk.n_tokens,
+                    ),
+                )
+                result.append(
+                    Chunk(
+                        id=cur.lastrowid,
+                        repo_id=chunk.repo_id,
+                        file_id=file_id,
+                        symbol_id=chunk.symbol_id,
+                        start_line=chunk.start_line,
+                        end_line=chunk.end_line,
+                        text=chunk.text,
+                        n_tokens=chunk.n_tokens,
+                    )
+                )
+        return result
+
+    def set_chunk_embeddings(self, embeddings: Mapping[int, Sequence[float]]) -> None:
+        with self._conn:
+            for chunk_id, vector in embeddings.items():
+                # Delete-then-insert, not INSERT OR REPLACE: confirmed
+                # directly that vec0 does not honour ON CONFLICT the way a
+                # regular table does (it still raises the PRIMARY KEY
+                # violation). Re-embedding an already-vectorised chunk --
+                # a caller retrying after a partial embed failure, most
+                # plausibly -- must not fail on that account.
+                self._conn.execute("DELETE FROM chunk_vec WHERE chunk_id = ?", (chunk_id,))
+                self._conn.execute(
+                    "INSERT INTO chunk_vec (chunk_id, embedding) VALUES (?, ?)",
+                    (chunk_id, sqlite_vec.serialize_float32(list(vector))),
+                )
+
+    def get_chunk(self, chunk_id: int) -> Chunk | None:
+        row = self._conn.execute("SELECT * FROM chunk WHERE id = ?", (chunk_id,)).fetchone()
+        return _row_to_chunk(row) if row else None
+
+    def count_chunks(self, repo_id: int) -> int:
+        (count,) = self._conn.execute(
+            "SELECT COUNT(*) FROM chunk WHERE repo_id = ?", (repo_id,)
+        ).fetchone()
+        return int(count)
+
+    def search_fts(
+        self, repo_id: int, query: str, limit: int = DEFAULT_LIST_LIMIT
+    ) -> Sequence[tuple[Chunk, float]]:
+        rows = self._conn.execute(
+            """
+            SELECT chunk.*, bm25(chunk_fts) AS score
+            FROM chunk_fts
+            JOIN chunk ON chunk.id = chunk_fts.rowid
+            WHERE chunk_fts MATCH ? AND chunk.repo_id = ?
+            ORDER BY score
+            LIMIT ?
+            """,
+            (query, repo_id, limit),
+        ).fetchall()
+        return [(_row_to_chunk(r), r["score"]) for r in rows]
+
+    def search_vector(
+        self, repo_id: int, embedding: Sequence[float], limit: int = DEFAULT_LIST_LIMIT
+    ) -> Sequence[tuple[Chunk, float]]:
+        # sqlite-vec's own KNN syntax requires a bare "k = ?" bound to run
+        # at all (confirmed directly) -- filtering to this repo happens
+        # afterwards in the outer query, not inside the vec0 MATCH itself,
+        # since chunk_vec carries no repo_id of its own to filter on. A
+        # single-repo-per-database file (design.md AD-5) means every row
+        # already belongs to repo_id in practice; the WHERE clause here is
+        # the same defensive belt-and-suspenders every other repo_id
+        # parameter in this file is, not load-bearing today.
+        rows = self._conn.execute(
+            """
+            SELECT chunk.*, chunk_vec.distance AS score
+            FROM chunk_vec
+            JOIN chunk ON chunk.id = chunk_vec.chunk_id
+            WHERE chunk_vec.embedding MATCH ? AND chunk_vec.k = ? AND chunk.repo_id = ?
+            ORDER BY score
+            """,
+            (sqlite_vec.serialize_float32(list(embedding)), limit, repo_id),
+        ).fetchall()
+        return [(_row_to_chunk(r), r["score"]) for r in rows]
+
 
 # -- row mapping ---------------------------------------------------------
 # Kept as free functions rather than methods: they are pure, and keeping
@@ -566,6 +714,19 @@ def _row_to_edge(row: sqlite3.Row) -> Edge:
         confidence=row["confidence"],
         evidence_file_id=row["evidence_file_id"],
         evidence_line=row["evidence_line"],
+    )
+
+
+def _row_to_chunk(row: sqlite3.Row) -> Chunk:
+    return Chunk(
+        id=row["id"],
+        repo_id=row["repo_id"],
+        file_id=row["file_id"],
+        symbol_id=row["symbol_id"],
+        start_line=row["start_line"],
+        end_line=row["end_line"],
+        text=row["text"],
+        n_tokens=row["n_tokens"],
     )
 
 

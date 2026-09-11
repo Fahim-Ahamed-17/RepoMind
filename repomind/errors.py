@@ -52,3 +52,17 @@ class ScipUnavailableError(RepoMindError):
     exact situation ("scip-python not found on PATH; install it or pass
     --no-scip"), which is what this message should read like.
     """
+
+
+class EmbeddingError(RepoMindError):
+    """The local embedding model could not be loaded or run.
+
+    Unlike :class:`ScipUnavailableError`, this is never caught and
+    degraded from -- design.md's own failure table is explicit:
+    "Indexing without embeddings is not a useful partial state." A
+    repository with no `resolved` edges is still fully searchable by
+    heuristic edges and full-text; one with no vectors has no semantic
+    search at all, which is F-5's entire purpose. Raised naming the model,
+    the cache location, and that a manual download there is the fix
+    (docs/conventions.md's own error-message rule).
+    """

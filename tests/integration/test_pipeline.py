@@ -154,6 +154,53 @@ def test_specific_cross_file_edges_resolve_correctly(
         store.close()
 
 
+def test_indexed_chunks_are_persisted_and_searchable(
+    isolated_workspace: Path, simple_fixture_repo: Path
+) -> None:
+    """RM-032: chunk_file()'s output flows through _index_one_file's
+    persistence and _embed_chunks' embedding call into a real, queryable
+    VectorStore -- not just "does not crash." The autouse ``fake_embedder``
+    fixture (tests/conftest.py) stands in for ``LocalEmbedder``, so this
+    asserts structure (chunks exist, FTS finds real text), not embedding
+    quality -- ranking by actual similarity is RM-033's job once hybrid
+    search has real vectors to fuse.
+    """
+    result = index_repository(simple_fixture_repo, use_scip=False)
+
+    assert result.chunk_count > 0
+
+    root_path = normalize_repo_path(simple_fixture_repo)
+    store = SqliteGraphStore(index_db_path(root_path))
+    try:
+        repo = store.get_repo_by_path(root_path)
+        assert repo is not None and repo.id is not None
+        assert store.count_chunks(repo.id) == result.chunk_count
+
+        hits = store.search_fts(repo.id, "widget")
+        assert len(hits) > 0
+        assert "widget" in hits[0][0].text.lower()
+    finally:
+        store.close()
+
+
+def test_a_repo_with_no_indexable_files_produces_zero_chunks(
+    isolated_workspace: Path, tmp_path: Path
+) -> None:
+    """Exercises ``_embed_chunks``' early return (``if not chunks:
+    return``) -- a repo where every file is skipped never even
+    constructs a ``LocalEmbedder``, per that function's own docstring.
+    """
+    repo = tmp_path / "docs_only_repo"
+    repo.mkdir()
+    (repo / "README.md").write_text("nothing but docs here", encoding="utf-8")
+
+    result = index_repository(repo, use_scip=False)
+
+    assert result.files_indexed == 0
+    assert result.files_skipped == 1
+    assert result.chunk_count == 0
+
+
 def test_reindex_is_idempotent(isolated_workspace: Path, simple_fixture_repo: Path) -> None:
     first = index_repository(simple_fixture_repo, use_scip=False)
     second = index_repository(simple_fixture_repo, use_scip=False)

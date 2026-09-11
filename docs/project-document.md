@@ -403,7 +403,7 @@ An objective metric on a problem most tools merely assert they solve.
 | Parsing | Tree-sitter | Fast, multi-language, error-tolerant |
 | Resolution | `scip-python` *(optional, time-boxed)* | Real cross-file semantics (§8.2) |
 | Storage | **SQLite** + `sqlite-vec` | One file, zero config. Graph traversal via recursive CTEs; vectors in the same store |
-| Embeddings | sentence-transformers (bge-small) | 33M params, CPU, any machine. Keeps the index local at negligible hardware cost |
+| Embeddings | fastembed (bge-small) | 33M params, CPU, any machine, no PyTorch (RM-031, confirmed 2026-09-10). Keeps the index local at negligible hardware cost |
 | Synthesis | **Pluggable, four modes** (§9.4) | Removes the hardware barrier without uploading the repo |
 | CLI | Typer | |
 | MCP server | FastAPI + MCP SDK | Editor integration (Principle 4) |

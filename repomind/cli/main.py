@@ -5,15 +5,17 @@ milestone's own exit criterion demonstrable (implementation-plan.md
 section 2), plus ``list``/``status``/``remove`` (F-15, RM-025) -- central
 storage (design.md AD-5) is unusable without a way to discover and manage
 what has been indexed, and F-15 depends only on RM-013 (M1), not on
-anything M3/M4 still has to build.
+anything M3/M4 still has to build. ``search`` (F-5) joined them once M3
+landed (RM-030 through RM-035) for the same reason: its whole dependency
+chain -- chunking, embedding, FTS5/sqlite-vec, RRF fusion, graph
+expansion -- was already built, unlike the rest of RM-045's bundle below.
 
-The rest of the full CLI surface (``ask``, ``search``, ``impact``,
-``graph``, ``serve``, ``--json`` on every read command, exit codes) is
-RM-045 in M4. Building that now would mean either faking commands that
-call into pipelines which do not exist yet (M3's retrieval, M4's
-synthesis) or inventing their shape ahead of the tickets that actually
-determine it -- both are exactly what AGENTS.md's "Rule zero" says not to
-do.
+The rest of the full CLI surface (``ask``, ``impact``, ``graph``,
+``serve``, ``--json`` on every read command, exit codes) is RM-045 in M4.
+Building that now would mean either faking commands that call into
+pipelines which do not exist yet (M4's synthesis, egress) or inventing
+their shape ahead of the tickets that actually determine it -- both are
+exactly what AGENTS.md's "Rule zero" says not to do.
 """
 
 from __future__ import annotations
@@ -26,10 +28,13 @@ from rich.progress import BarColumn, Progress, TextColumn
 
 from repomind.analyze.registry import RepoListing, repo_listing, repo_status
 from repomind.analyze.reverse import DEFAULT_DEPTH, MAX_DEPTH, find_references
+from repomind.embed.local import LocalEmbedder
 from repomind.errors import RepoMindError, WorkspaceLockedError
 from repomind.index.pipeline import IndexProgress, index_repository
 from repomind.ingest.git import commits_behind, current_sha
-from repomind.model import ScipStatus, Tier
+from repomind.model import ScipStatus, SymbolKind, Tier
+from repomind.retrieve.search import DEFAULT_RESULT_LIMIT
+from repomind.retrieve.search import search as search_code
 from repomind.store.sqlite.graph import SqliteGraphStore
 from repomind.workspace import (
     index_db_path,
@@ -125,6 +130,7 @@ def index(
     )
     edges_summary = ", ".join(f"{k}={v}" for k, v in result.edge_counts.items())
     console.print(f"  edges:    {edges_summary}")
+    console.print(f"  chunks:   {result.chunk_count} (embedded, searchable)")
     console.print(f"  SHA:      {result.repo.indexed_sha or '[dim]none (not a git repo)[/dim]'}")
 
     # "Tell the user" (docs/conventions.md Logging section) -- scip_status
@@ -212,6 +218,89 @@ def refs(
                     f"  depth={hit.depth}  [dim]{hit.source.kind.value}[/dim] "
                     f"{hit.source.qualified_name}  [dim]({hit.kind.value}, {loc})[/dim]"
                 )
+    finally:
+        store.close()
+
+
+@app.command()
+def search(
+    query: str = typer.Argument(..., help="Natural-language question or identifier to search for."),
+    limit: int = typer.Option(
+        DEFAULT_RESULT_LIMIT, "--limit", help="Maximum number of results to return."
+    ),
+    language: list[str] = typer.Option(
+        [], "--language", help="Restrict to a language (repeatable). Default: every language."
+    ),
+    path_prefix: str | None = typer.Option(
+        None, "--path-prefix", help="Restrict to paths starting with this prefix."
+    ),
+    kind: list[str] = typer.Option(
+        [], "--kind", help="Restrict to a symbol kind (repeatable). Default: every kind."
+    ),
+) -> None:
+    """Hybrid code search: vector similarity and FTS5 keyword matching,
+    fused by Reciprocal Rank Fusion (F-5). Requires no LLM -- this is
+    retrieval only, mode D (AGENTS.md invariant 5). Operates on the
+    current directory's already-built index -- run `repomind index .`
+    first.
+    """
+    root = Path.cwd()
+    root_path_str = normalize_repo_path(root)
+    db_path = index_db_path(root_path_str)
+    if not db_path.exists():
+        console.print(f"[red]error:[/red] {root} has not been indexed yet. Run `repomind index .`")
+        raise typer.Exit(code=1)
+
+    store = SqliteGraphStore(db_path)
+    try:
+        repo = store.get_repo_by_path(root_path_str)
+        if repo is None or repo.id is None:
+            console.print(
+                f"[red]error:[/red] {root} has not been indexed yet. Run `repomind index .`"
+            )
+            raise typer.Exit(code=1)
+
+        kinds: tuple[SymbolKind, ...] | None = None
+        if kind:
+            try:
+                kinds = tuple(SymbolKind(k) for k in kind)
+            except ValueError:
+                valid = ", ".join(k.value for k in SymbolKind)
+                console.print(f"[red]error:[/red] --kind must be one of: {valid}")
+                raise typer.Exit(code=1) from None
+
+        try:
+            hits = search_code(
+                store,
+                LocalEmbedder(),
+                repo.id,
+                query,
+                limit=limit,
+                languages=language or None,
+                path_prefix=path_prefix,
+                kinds=kinds,
+            )
+        except RepoMindError as exc:
+            console.print(f"[red]error:[/red] {exc}")
+            raise typer.Exit(code=1) from exc
+
+        if not hits:
+            console.print("[dim]no results.[/dim]")
+            return
+
+        for hit in hits:
+            location = f"{hit.file.path}:{hit.chunk.start_line}-{hit.chunk.end_line}"
+            symbol_display = (
+                f"  [dim]{hit.symbol.qualified_name}[/dim]" if hit.symbol is not None else ""
+            )
+            console.print(f"[bold]{location}[/bold]{symbol_display}")
+            # First 3 non-blank lines, not just the first: a chunk merging
+            # a short symbol with its surrounding remainder (chunker.py's
+            # MERGE_BELOW_TOKENS) often opens with a module docstring, one
+            # line of which says nothing about what actually matched.
+            preview_lines = [line for line in hit.chunk.text.splitlines() if line.strip()][:3]
+            for line in preview_lines:
+                console.print(f"  {line.strip()[:100]}")
     finally:
         store.close()
 
@@ -343,6 +432,7 @@ def status(
             "  symbols:  " + ", ".join(f"{k}={v}" for k, v in report.symbol_counts.items() if v)
         )
         console.print("  edges:    " + ", ".join(f"{k}={v}" for k, v in report.edge_counts.items()))
+        console.print(f"  chunks:   {report.chunk_count}")
         if report.last_run_status is not None:
             duration = (
                 f"{report.last_run_duration_seconds:.2f}s"

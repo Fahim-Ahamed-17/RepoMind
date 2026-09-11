@@ -243,7 +243,7 @@ Confirmed in design §11; restated for completeness.
 | Parsing | `tree-sitter`, `tree-sitter-python`, `tree-sitter-typescript` | Pinned exact |
 | Resolution | `scip-python`, `scip-typescript` (Node subprocesses) | Optional at runtime |
 | Storage | SQLite + `sqlite-vec` + FTS5 | Pinned exact — newest dependency |
-| Embeddings | `sentence-transformers`, bge-small-en-v1.5 | Pinned |
+| Embeddings | `fastembed`, bge-small-en-v1.5 | Pinned (RM-031, confirmed 2026-09-10: swapped from the originally-pinned `sentence-transformers`, which pulls ~2GB of PyTorch -- `fastembed` runs the same model via `onnxruntime` at ~150MB, no PyTorch) |
 | LLM | `openai`, `anthropic` SDKs; Ollama over HTTP | Compatible range |
 | CLI | `typer` + `rich` | Compatible range |
 | Server | `fastapi`, `uvicorn`, MCP SDK | Compatible range |

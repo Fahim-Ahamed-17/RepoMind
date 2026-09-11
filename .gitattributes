@@ -4,3 +4,9 @@
 *.pdf   binary
 *.png   binary
 *.jpg   binary
+
+# Vendored tiktoken encoding: an opaque, sha1-named blob (see that
+# directory's README). Marked binary so the `* text=auto eol=lf` rule
+# above can never rewrite its line endings -- the base64 lines inside it
+# would stop decoding -- and so git does not try to diff 1.6 MB of it.
+repomind/index/tiktoken_cache/9b5ad71b2ce5302211f9c61530b329a4922fc6a4 binary
