@@ -20,6 +20,8 @@ from __future__ import annotations
 from itertools import pairwise
 from pathlib import Path
 
+import pytest
+from repomind.index import chunker
 from repomind.index.chunker import (
     MERGE_BELOW_TOKENS,
     SPLIT_ABOVE_TOKENS,
@@ -103,6 +105,28 @@ def test_count_tokens_of_empty_string_is_zero() -> None:
 
 def test_count_tokens_is_positive_for_real_text() -> None:
     assert count_tokens("def f():\n    return 1\n") > 0
+
+
+def test_building_the_encoding_never_needs_the_network(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """AGENTS.md invariant 1, at the one place it nearly broke: tiktoken
+    downloads ``cl100k_base`` on first use, and chunking builds it for
+    every indexed file. ``index/tiktoken_cache/`` vendors the table so it
+    never does.
+
+    Pointing ``TIKTOKEN_CACHE_DIR`` at an empty directory here is what
+    makes this a real test rather than a tautology -- it removes the warm
+    cache a developer machine always has, which is exactly why the
+    original bug passed locally and failed on every CI runner. Any fetch
+    is blocked by pytest-socket (``--disable-socket``), so a regression
+    fails here loudly instead of silently reaching the network.
+    """
+    monkeypatch.setenv("TIKTOKEN_CACHE_DIR", str(tmp_path))
+    monkeypatch.setattr(chunker, "_encoding", None)  # force a fresh load
+
+    assert chunker.count_tokens("def f():\n    return 1\n") > 0
+    assert not list(tmp_path.iterdir())  # nothing downloaded into the empty cache
 
 
 # -- structural behaviour: remainder chunks ----------------------------------

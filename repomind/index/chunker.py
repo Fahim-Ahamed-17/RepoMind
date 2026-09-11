@@ -44,6 +44,8 @@ produces no chunk at all -- an empty retrieval unit helps no one.
 
 from __future__ import annotations
 
+import os
+from pathlib import Path
 from typing import TYPE_CHECKING
 
 import tiktoken
@@ -68,6 +70,22 @@ SPLIT_ABOVE_TOKENS = 800
 #: a split part of it, if the class as a whole is oversized).
 _ANCHOR_KINDS = frozenset({SymbolKind.FUNCTION, SymbolKind.CLASS})
 
+ENCODING_NAME = "cl100k_base"
+
+#: The vendored copy of ``cl100k_base``'s merge-rank table, shipped inside
+#: the package. ``tiktoken`` otherwise downloads it from
+#: ``openaipublic.blob.core.windows.net`` the first time an encoding is
+#: built, which would put an HTTP call squarely in the indexing path and
+#: break AGENTS.md invariant 1 -- chunking calls :func:`count_tokens` for
+#: every file. That is not hypothetical: it is exactly what CI caught,
+#: with every chunking and indexing test failing on a cold cache while
+#: passing on developer machines whose cache was already warm.
+#:
+#: The filename is not arbitrary -- ``tiktoken`` looks its cache entries
+#: up by ``sha1`` of the blob URL, so this name is what makes the file
+#: findable. See that directory's README.
+_BUNDLED_CACHE_DIR = Path(__file__).parent / "tiktoken_cache"
+
 #: `tiktoken`'s own encoding load has real cost (parsing its merge-rank
 #: table); built once, lazily, and reused for every file in a run rather
 #: than per call. design.md section 10: "tiktoken for budgeting ...
@@ -77,10 +95,32 @@ _ANCHOR_KINDS = frozenset({SymbolKind.FUNCTION, SymbolKind.CLASS})
 _encoding: tiktoken.Encoding | None = None
 
 
+def _load_encoding() -> tiktoken.Encoding:
+    """Build the encoding from the vendored table, never the network.
+
+    ``TIKTOKEN_CACHE_DIR`` is the only knob ``tiktoken`` offers for this,
+    and it is read at call time -- so it is set around this one call and
+    restored afterwards rather than mutated for the whole process. Set
+    unconditionally, not just when unset: a caller with their own
+    ``TIKTOKEN_CACHE_DIR`` pointing somewhere that lacks this blob would
+    otherwise send us straight back to the network, which is the one
+    outcome this function exists to rule out.
+    """
+    previous = os.environ.get("TIKTOKEN_CACHE_DIR")
+    os.environ["TIKTOKEN_CACHE_DIR"] = str(_BUNDLED_CACHE_DIR)
+    try:
+        return tiktoken.get_encoding(ENCODING_NAME)
+    finally:
+        if previous is None:
+            os.environ.pop("TIKTOKEN_CACHE_DIR", None)
+        else:
+            os.environ["TIKTOKEN_CACHE_DIR"] = previous
+
+
 def count_tokens(text: str) -> int:
     global _encoding
     if _encoding is None:
-        _encoding = tiktoken.get_encoding("cl100k_base")
+        _encoding = _load_encoding()
     return len(_encoding.encode(text, disallowed_special=()))
 
 
